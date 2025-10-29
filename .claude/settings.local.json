@@ -9,7 +9,8 @@
       "Bash(npm create:*)",
       "Bash(npm install:*)",
       "Bash(cargo check:*)",
-      "Bash(npm run tauri:*)"
+      "Bash(npm run tauri:*)",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []
