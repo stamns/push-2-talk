@@ -12,6 +12,7 @@ function App() {
   const [status, setStatus] = useState<"idle" | "running" | "recording" | "transcribing">("idle");
   const [transcript, setTranscript] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [recordingTime, setRecordingTime] = useState(0);
 
   // 加载配置
   useEffect(() => {
@@ -32,6 +33,27 @@ function App() {
 
     init();
   }, []);
+
+  // 计时器逻辑
+  useEffect(() => {
+    let interval: number;
+
+    if (status === "recording") {
+      // 重置计时器
+      setRecordingTime(0);
+
+      // 每秒更新
+      interval = setInterval(() => {
+        setRecordingTime(prev => prev + 1);
+      }, 1000);
+    }
+
+    return () => {
+      if (interval) {
+        clearInterval(interval);
+      }
+    };
+  }, [status]);
 
   const loadConfig = async () => {
     try {
@@ -142,6 +164,12 @@ function App() {
     }
   };
 
+  const formatTime = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
   const handleSaveConfig = async () => {
     try {
       const result = await invoke<string>("save_config", { apiKey });
@@ -194,7 +222,11 @@ function App() {
           <div className="flex items-center gap-3 mb-2">
             <div className={`w-4 h-4 rounded-full ${getStatusColor()}`}></div>
             <span className="text-lg font-medium text-gray-700">
-              {getStatusText()}
+              {status === "recording" ? (
+                <>录音中 {formatTime(recordingTime)}</>
+              ) : (
+                getStatusText()
+              )}
             </span>
           </div>
           {status === "running" && (
