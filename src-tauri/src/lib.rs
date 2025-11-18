@@ -27,10 +27,11 @@ struct AppState {
 // Tauri Commands
 
 #[tauri::command]
-async fn save_config(api_key: String) -> Result<String, String> {
+async fn save_config(api_key: String, fallback_api_key: String) -> Result<String, String> {
     tracing::info!("保存配置...");
     let config = AppConfig {
         dashscope_api_key: api_key,
+        siliconflow_api_key: fallback_api_key,
     };
 
     config
@@ -50,6 +51,7 @@ async fn load_config() -> Result<AppConfig, String> {
 async fn start_app(
     app_handle: AppHandle,
     api_key: String,
+    fallback_api_key: String,
 ) -> Result<String, String> {
     tracing::info!("启动应用...");
 
@@ -81,6 +83,7 @@ async fn start_app(
     let audio_recorder_stop = Arc::clone(&state.audio_recorder);
     let text_inserter_stop = Arc::clone(&state.text_inserter);
     let api_key_clone = api_key.clone();
+    let fallback_api_key_clone = fallback_api_key.clone();
 
     // 按键按下回调
     let on_start = move || {
@@ -110,6 +113,7 @@ async fn start_app(
         let recorder = Arc::clone(&audio_recorder_stop);
         let inserter = Arc::clone(&text_inserter_stop);
         let key = api_key_clone.clone();
+        let fallback_key = fallback_api_key_clone.clone();
 
         // 播放停止录音提示音
         beep_player::play_stop_beep();
@@ -139,9 +143,19 @@ async fn start_app(
                 // 发送转录中事件
                 let _ = app.emit("transcribing", ());
 
-                // 调用 Qwen ASR API
-                let asr_client = QwenASRClient::new(key);
-                match asr_client.transcribe(&audio_path).await {
+                // 使用主备并行转录逻辑
+                let result = if !fallback_key.is_empty() {
+                    // 如果配置了备用 API，使用主备并行逻辑
+                    tracing::info!("使用主备并行转录模式");
+                    qwen_asr::transcribe_with_fallback(key, fallback_key, &audio_path).await
+                } else {
+                    // 否则只使用千问 API
+                    tracing::info!("仅使用千问 ASR");
+                    let asr_client = QwenASRClient::new(key);
+                    asr_client.transcribe(&audio_path).await
+                };
+
+                match result {
                     Ok(text) => {
                         tracing::info!("转录结果: {}", text);
 

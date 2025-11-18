@@ -17,7 +17,10 @@
       "Bash(timeout:*)",
       "Bash(if not exist \"src-tauri\\capabilities\" mkdir src-tauricapabilities)",
       "Bash(git commit:*)",
-      "Bash(git clean:*)"
+      "Bash(git clean:*)",
+      "Bash(cargo build:*)",
+      "Bash(test:*)",
+      "Bash(cargo run:*)"
     ],
     "deny": [],
     "ask": []

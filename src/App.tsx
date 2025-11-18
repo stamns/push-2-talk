@@ -4,10 +4,12 @@ import { listen } from "@tauri-apps/api/event";
 
 interface AppConfig {
   dashscope_api_key: string;
+  siliconflow_api_key: string;
 }
 
 function App() {
   const [apiKey, setApiKey] = useState("");
+  const [fallbackApiKey, setFallbackApiKey] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const [status, setStatus] = useState<"idle" | "running" | "recording" | "transcribing">("idle");
   const [transcript, setTranscript] = useState("");
@@ -59,13 +61,17 @@ function App() {
     try {
       console.log("开始加载配置...");
       const config = await invoke<AppConfig>("load_config");
-      console.log("配置加载成功:", { apiKeyLength: config.dashscope_api_key.length });
+      console.log("配置加载成功:", {
+        apiKeyLength: config.dashscope_api_key.length,
+        fallbackApiKeyLength: config.siliconflow_api_key?.length || 0
+      });
       setApiKey(config.dashscope_api_key);
+      setFallbackApiKey(config.siliconflow_api_key || "");
 
       // 如果已经配置了 API Key，自动启动应用
       if (config.dashscope_api_key && config.dashscope_api_key.trim() !== "") {
         console.log("检测到已保存的 API Key，自动启动应用...");
-        autoStartApp(config.dashscope_api_key);
+        autoStartApp(config.dashscope_api_key, config.siliconflow_api_key || "");
       } else {
         console.log("未检测到已保存的 API Key");
       }
@@ -74,12 +80,12 @@ function App() {
     }
   };
 
-  const autoStartApp = async (apiKey: string) => {
+  const autoStartApp = async (apiKey: string, fallbackApiKey: string) => {
     try {
       // 确保事件监听器已完全设置
       await new Promise(resolve => setTimeout(resolve, 100));
 
-      const result = await invoke<string>("start_app", { apiKey });
+      const result = await invoke<string>("start_app", { apiKey, fallbackApiKey });
       console.log("自动启动成功:", result);
       setStatus("running");
       setError(null);
@@ -172,7 +178,7 @@ function App() {
 
   const handleSaveConfig = async () => {
     try {
-      const result = await invoke<string>("save_config", { apiKey });
+      const result = await invoke<string>("save_config", { apiKey, fallbackApiKey });
       console.log(result);
       setError(null);
       alert("配置已保存");
@@ -192,9 +198,9 @@ function App() {
         }
         // 启动前先保存配置
         console.log("启动前保存配置...");
-        await invoke<string>("save_config", { apiKey });
+        await invoke<string>("save_config", { apiKey, fallbackApiKey });
         console.log("配置保存成功，开始启动应用...");
-        const result = await invoke<string>("start_app", { apiKey });
+        const result = await invoke<string>("start_app", { apiKey, fallbackApiKey });
         console.log(result);
         setStatus("running");
         setError(null);
@@ -260,29 +266,51 @@ function App() {
         </div>
 
         {/* API 配置 */}
-        <div className="mb-6">
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            DashScope API Key:
-          </label>
-          <div className="flex gap-2">
+        <div className="mb-6 space-y-4">
+          {/* 主 API Key - 千问 */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              主 API Key (千问 ASR):
+            </label>
+            <div className="flex gap-2">
+              <input
+                type={showApiKey ? "text" : "password"}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="sk-..."
+                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                disabled={status !== "idle"}
+              />
+              <button
+                className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition"
+                onClick={() => setShowApiKey(!showApiKey)}
+              >
+                {showApiKey ? "隐藏" : "显示"}
+              </button>
+            </div>
+            <p className="mt-2 text-xs text-gray-500">
+              获取 API Key: <a href="https://help.aliyun.com/zh/dashscope/developer-reference/quick-start" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">DashScope 文档</a>
+            </p>
+          </div>
+
+          {/* 备用 API Key - SenseVoice */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              备用 API Key (SenseVoice):
+            </label>
             <input
               type={showApiKey ? "text" : "password"}
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
+              value={fallbackApiKey}
+              onChange={(e) => setFallbackApiKey(e.target.value)}
               placeholder="sk-..."
-              className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               disabled={status !== "idle"}
             />
-            <button
-              className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition"
-              onClick={() => setShowApiKey(!showApiKey)}
-            >
-              {showApiKey ? "隐藏" : "显示"}
-            </button>
+            <p className="mt-2 text-xs text-gray-500">
+              获取 API Key: <a href="https://cloud.siliconflow.cn/" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">硅基流动</a>
+              <span className="ml-2 text-gray-400">（可选，主 API 超时时自动切换）</span>
+            </p>
           </div>
-          <p className="mt-2 text-xs text-gray-500">
-            获取 API Key: <a href="https://help.aliyun.com/zh/dashscope/developer-reference/quick-start" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">DashScope 文档</a>
-          </p>
         </div>
 
         {/* 保存配置按钮 */}

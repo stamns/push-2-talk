@@ -6,12 +6,15 @@ use anyhow::Result;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub dashscope_api_key: String,
+    #[serde(default)]
+    pub siliconflow_api_key: String,
 }
 
 impl AppConfig {
     pub fn new() -> Self {
         Self {
             dashscope_api_key: String::new(),
+            siliconflow_api_key: String::new(),
         }
     }
 
