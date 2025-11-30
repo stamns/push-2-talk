@@ -99,7 +99,9 @@ impl QwenASRClient {
             },
             "parameters": {
                 "result_format": "message",
-                "enable_itn": true
+                "enable_itn": false,
+                "disfluency_removal": true,
+                "language": "zh"
             }
         });
 
