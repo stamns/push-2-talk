@@ -28,8 +28,11 @@ function App() {
   const [transcript, setTranscript] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [recordingTime, setRecordingTime] = useState(0);
+  const [transcribeTime, setTranscribeTime] = useState<number | null>(null);
   const [showSuccessToast, setShowSuccessToast] = useState(false);
-  
+
+  // 用于记录转录开始时间
+  const transcribeStartRef = useRef<number | null>(null);
   // 用于转录框自动滚动到底部
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
@@ -103,8 +106,14 @@ function App() {
       });
       await listen("transcribing", () => {
         setStatus("transcribing");
+        transcribeStartRef.current = Date.now();
       });
       await listen<string>("transcription_complete", (event) => {
+        if (transcribeStartRef.current) {
+          const elapsed = Date.now() - transcribeStartRef.current;
+          setTranscribeTime(elapsed);
+          transcribeStartRef.current = null;
+        }
         setTranscript(event.payload);
         setStatus("running");
       });
@@ -235,9 +244,16 @@ function App() {
                   <Activity size={14} /> 实时转写内容
                 </label>
                 {transcript && (
-                    <span className="text-xs text-slate-400 bg-slate-100 px-2 py-1 rounded-md">
-                      {transcript.length} 字
-                    </span>
+                    <div className="flex items-center gap-2">
+                      {transcribeTime !== null && (
+                        <span className="text-xs text-slate-400 bg-slate-100 px-2 py-1 rounded-md">
+                          耗时 {(transcribeTime / 1000).toFixed(2)}s
+                        </span>
+                      )}
+                      <span className="text-xs text-slate-400 bg-slate-100 px-2 py-1 rounded-md">
+                        {transcript.length} 字
+                      </span>
+                    </div>
                 )}
               </div>
               
