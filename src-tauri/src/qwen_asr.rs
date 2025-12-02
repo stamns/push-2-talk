@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose};
 
+#[derive(Clone)]
 pub struct QwenASRClient {
     api_key: String,
     client: reqwest::Client,
@@ -17,6 +18,8 @@ impl QwenASRClient {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(6))  // 6秒总超时
             .connect_timeout(Duration::from_secs(5))  // 5秒连接超时
+            .pool_idle_timeout(Duration::from_secs(1800))  // 15分钟空闲超时，保持连接复用
+            .pool_max_idle_per_host(2)  // 每个 host 最多保持 2 个空闲连接
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -158,6 +161,7 @@ impl QwenASRClient {
 }
 
 // SenseVoice 客户端（硅基流动）
+#[derive(Clone)]
 pub struct SenseVoiceClient {
     api_key: String,
     client: reqwest::Client,
@@ -168,6 +172,8 @@ impl SenseVoiceClient {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(6))  // 6秒总超时
             .connect_timeout(Duration::from_secs(5))
+            .pool_idle_timeout(Duration::from_secs(900))  // 15分钟空闲超时
+            .pool_max_idle_per_host(2)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -254,44 +260,43 @@ pub async fn transcribe_with_fallback_bytes(
     sensevoice_api_key: String,
     audio_data: Vec<u8>,
 ) -> Result<String> {
-    tracing::info!("启动主备并行转录 (内存模式), 音频大小: {} bytes", audio_data.len());
-
-    // 创建两个客户端
     let qwen_client = QwenASRClient::new(qwen_api_key);
     let sensevoice_client = SenseVoiceClient::new(sensevoice_api_key);
+    transcribe_with_fallback_clients(qwen_client, sensevoice_client, audio_data).await
+}
 
-    // 克隆音频数据用于并行任务
+pub async fn transcribe_with_fallback_clients(
+    qwen_client: QwenASRClient,
+    sensevoice_client: SenseVoiceClient,
+    audio_data: Vec<u8>,
+) -> Result<String> {
+    tracing::info!("启动主备并行转录 (内存模式), 音频大小: {} bytes", audio_data.len());
+
     let audio_data_sensevoice = audio_data.clone();
-
-    // 使用共享状态存储 SenseVoice 结果
     let sensevoice_result: Arc<Mutex<Option<Result<String>>>> = Arc::new(Mutex::new(None));
     let sensevoice_result_clone = Arc::clone(&sensevoice_result);
 
-    // 启动 SenseVoice 异步任务
     let sensevoice_handle = tokio::spawn(async move {
         tracing::info!("🚀 SenseVoice 任务启动");
         let result = sensevoice_client.transcribe_bytes(&audio_data_sensevoice).await;
         match &result {
-            Ok(text) => tracing::info!("✅ SenseVoice 转录成功: {}", text),
-            Err(e) => tracing::error!("❌ SenseVoice 转录失败: {}", e),
+            Ok(text) => tracing::info!("✅SenseVoice 转录成功: {}", text),
+            Err(e) => tracing::error!("❌SenseVoice 转录失败: {}", e),
         }
         *sensevoice_result_clone.lock().unwrap() = Some(result);
     });
 
-    // 千问重试逻辑（最多3次尝试）
     let max_retries = 2;
     let mut qwen_last_error = None;
 
     for attempt in 0..=max_retries {
-        // 如果是重试，先检查 SenseVoice 是否已经完成
         if attempt > 0 {
-            tracing::warn!("⏳ 千问第 {} 次重试前，检查 SenseVoice 结果...", attempt);
+            tracing::warn!("⏳千问第{} 次重试前，检查 SenseVoice 结果...", attempt);
 
-            // 检查 SenseVoice 是否已有结果
             if let Some(sv_result) = sensevoice_result.lock().unwrap().as_ref() {
                 match sv_result {
                     Ok(text) => {
-                        tracing::info!("✅ 千问重试前发现 SenseVoice 已成功，立即使用: {}", text);
+                        tracing::info!("✅千问重试前发现 SenseVoice 已成功，立即使用: {}", text);
                         return Ok(text.clone());
                     }
                     Err(e) => {
@@ -300,41 +305,37 @@ pub async fn transcribe_with_fallback_bytes(
                 }
             }
 
-            // 等待一小段时间再重试
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        // 尝试千问单次请求
-        tracing::info!("🔄 千问第 {} 次尝试 (共 {} 次)", attempt + 1, max_retries + 1);
+        tracing::info!("🔄 千问第{} 次尝试(共{} 次)", attempt + 1, max_retries + 1);
         match qwen_client.transcribe_from_memory(&audio_data).await {
             Ok(text) => {
-                tracing::info!("✅ 千问转录成功: {}", text);
+                tracing::info!("✅千问转录成功: {}", text);
                 return Ok(text);
             }
             Err(e) => {
-                tracing::error!("❌ 千问第 {} 次尝试失败: {}", attempt + 1, e);
+                tracing::error!("❌千问第{} 次尝试失败 {}", attempt + 1, e);
                 qwen_last_error = Some(e);
             }
         }
     }
 
-    // 千问全部失败，等待 SenseVoice 最终结果
     tracing::warn!("⚠️ 千问全部失败，等待 SenseVoice 最终结果...");
     let _ = sensevoice_handle.await;
 
-    // 获取 SenseVoice 的最终结果
     if let Some(result) = sensevoice_result.lock().unwrap().take() {
         match result {
             Ok(text) => {
-                tracing::info!("✅ 使用 SenseVoice 备用结果: {}", text);
+                tracing::info!("✅使用 SenseVoice 备用结果: {}", text);
                 return Ok(text);
             }
             Err(sensevoice_error) => {
-                tracing::error!("❌ 两个 API 都失败了");
+                tracing::error!("❌两个 API 都失败了");
                 tracing::error!("   千问错误: {:?}", qwen_last_error);
                 tracing::error!("   SenseVoice 错误: {:?}", sensevoice_error);
                 return Err(anyhow::anyhow!(
-                    "两个 API 都失败 - 千问: {:?}, SenseVoice: {}",
+                    "两个 API 都失败- 千问: {:?}, SenseVoice: {}",
                     qwen_last_error,
                     sensevoice_error
                 ));
@@ -342,6 +343,6 @@ pub async fn transcribe_with_fallback_bytes(
         }
     }
 
-    // 兜底错误
-    Err(anyhow::anyhow!("所有 API 都失败"))
+    Err(anyhow::anyhow!("所有API都失败"))
 }
+
