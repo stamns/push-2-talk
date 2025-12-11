@@ -21,7 +21,12 @@ use streaming_recorder::StreamingRecorder;
 use text_inserter::TextInserter;
 
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{
+    AppHandle, Emitter, Manager,
+    tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState},
+    menu::{Menu, MenuItem},
+    WindowEvent,
+};
 
 // 全局应用状态
 struct AppState {
@@ -49,6 +54,7 @@ async fn save_config(
     use_realtime: Option<bool>,
     enable_post_process: Option<bool>,
     llm_config: Option<config::LlmConfig>,
+    close_action: Option<String>,
 ) -> Result<String, String> {
     tracing::info!("保存配置...");
     let config = AppConfig {
@@ -57,6 +63,7 @@ async fn save_config(
         use_realtime_asr: use_realtime.unwrap_or(true),
         enable_llm_post_process: enable_post_process.unwrap_or(false),
         llm_config: llm_config.unwrap_or_default(),
+        close_action,
     };
 
     config
@@ -748,6 +755,34 @@ async fn stop_app(app_handle: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn hide_to_tray(app_handle: AppHandle) -> Result<String, String> {
+    if let Some(window) = app_handle.get_webview_window("main") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    Ok("已最小化到托盘".to_string())
+}
+
+#[tauri::command]
+async fn quit_app(app_handle: AppHandle) -> Result<(), String> {
+    // 先停止服务
+    let state = app_handle.state::<AppState>();
+    {
+        let mut is_running = state.is_running.lock().unwrap();
+        if *is_running {
+            *state.audio_recorder.lock().unwrap() = None;
+            *state.streaming_recorder.lock().unwrap() = None;
+            *state.text_inserter.lock().unwrap() = None;
+            *state.post_processor.lock().unwrap() = None;
+            *state.qwen_client.lock().unwrap() = None;
+            *state.sensevoice_client.lock().unwrap() = None;
+            *is_running = false;
+        }
+    }
+    app_handle.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
 async fn cancel_transcription(app_handle: AppHandle) -> Result<String, String> {
     tracing::info!("取消转录...");
 
@@ -815,9 +850,49 @@ pub fn run() {
                 active_session: Arc::new(tokio::sync::Mutex::new(None)),
                 audio_sender_handle: Arc::new(Mutex::new(None)),
             };
-
             app.manage(app_state);
+
+            // 创建托盘菜单
+            let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出程序", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+            // 创建系统托盘
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .tooltip("PushToTalk - AI 语音转写助手")
+                .on_menu_event(|app, event| {
+                    match event.id.as_ref() {
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                        if let Some(window) = tray.app_handle().get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.emit("close_requested", ());
+            }
         })
         .invoke_handler(tauri::generate_handler![
             save_config,
@@ -825,6 +900,8 @@ pub fn run() {
             start_app,
             stop_app,
             cancel_transcription,
+            hide_to_tray,
+            quit_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

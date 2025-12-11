@@ -15,6 +15,9 @@ pub struct AppConfig {
     pub enable_llm_post_process: bool,
     #[serde(default)]
     pub llm_config: LlmConfig,
+    /// 关闭行为: "close" = 直接关闭, "minimize" = 最小化到托盘, None = 每次询问
+    #[serde(default)]
+    pub close_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +96,7 @@ impl AppConfig {
             use_realtime_asr: default_use_realtime_asr(),
             enable_llm_post_process: false,
             llm_config: LlmConfig::default(),
+            close_action: None,
         }
     }
 

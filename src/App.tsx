@@ -26,7 +26,8 @@ import {
   MessageSquareQuote,
   History,
   Copy,
-  Clock
+  Clock,
+  Minus
 } from "lucide-react";
 import { nanoid } from 'nanoid';
 
@@ -52,6 +53,7 @@ interface AppConfig {
   use_realtime_asr: boolean;
   enable_llm_post_process: boolean;
   llm_config: LlmConfig;
+  close_action: "close" | "minimize" | null;
 }
 
 interface TranscriptionResult {
@@ -142,6 +144,8 @@ function App() {
   const [history, setHistory] = useState<HistoryRecord[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [copyToast, setCopyToast] = useState<string | null>(null);
+  const [showCloseDialog, setShowCloseDialog] = useState(false);
+  const [rememberChoice, setRememberChoice] = useState(false);
 
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
@@ -291,6 +295,21 @@ function App() {
         setStatus("running");
         setError(null);
       });
+      // 监听窗口关闭请求
+      await listen("close_requested", async () => {
+        try {
+          const config = await invoke<AppConfig>("load_config");
+          if (config.close_action === "close") {
+            await invoke("quit_app");
+          } else if (config.close_action === "minimize") {
+            await invoke("hide_to_tray");
+          } else {
+            setShowCloseDialog(true);
+          }
+        } catch {
+          setShowCloseDialog(true);
+        }
+      });
     } catch (err) {
       throw err;
     }
@@ -338,6 +357,30 @@ function App() {
       await invoke<string>("cancel_transcription");
     } catch (err) {
       setError(String(err));
+    }
+  };
+
+  const handleCloseAction = async (action: "close" | "minimize") => {
+    if (rememberChoice) {
+      try {
+        await invoke("save_config", {
+          apiKey,
+          fallbackApiKey,
+          useRealtime,
+          enablePostProcess,
+          llmConfig,
+          closeAction: action,
+        });
+      } catch (err) {
+        console.error("保存关闭配置失败:", err);
+      }
+    }
+    setShowCloseDialog(false);
+    setRememberChoice(false);
+    if (action === "close") {
+      await invoke("quit_app");
+    } else {
+      await invoke("hide_to_tray");
     }
   };
 
@@ -1006,6 +1049,79 @@ function App() {
                 {copyToast}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Close Confirmation Dialog */}
+      {showCloseDialog && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden animate-in zoom-in-95 duration-200">
+            {/* Dialog Header */}
+            <div className="px-6 py-4 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-gray-50">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900">关闭应用</h3>
+                  <p className="text-xs text-slate-500">选择关闭方式</p>
+                </div>
+                <button
+                  onClick={() => {
+                    setShowCloseDialog(false);
+                    setRememberChoice(false);
+                  }}
+                  className="p-2 hover:bg-slate-200 rounded-lg text-slate-500 hover:text-slate-700 transition-colors"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            {/* Dialog Body */}
+            <div className="p-6 space-y-4">
+              <p className="text-sm text-slate-600">您希望如何处理应用窗口？</p>
+
+              <div className="space-y-3">
+                <button
+                  onClick={() => handleCloseAction("minimize")}
+                  className="w-full p-4 bg-blue-50 hover:bg-blue-100 border border-blue-100 hover:border-blue-200 rounded-xl text-left transition-all group"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-blue-100 group-hover:bg-blue-200 rounded-lg text-blue-600 transition-colors">
+                      <Minus size={18} />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium text-slate-900">最小化到系统托盘</div>
+                      <div className="text-xs text-slate-500">应用将在后台继续运行</div>
+                    </div>
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => handleCloseAction("close")}
+                  className="w-full p-4 bg-slate-50 hover:bg-slate-100 border border-slate-100 hover:border-slate-200 rounded-xl text-left transition-all group"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-slate-100 group-hover:bg-slate-200 rounded-lg text-slate-600 transition-colors">
+                      <XCircle size={18} />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium text-slate-900">完全退出</div>
+                      <div className="text-xs text-slate-500">关闭应用并停止所有服务</div>
+                    </div>
+                  </div>
+                </button>
+              </div>
+
+              <label className="flex items-center gap-3 p-3 bg-slate-50/50 rounded-xl cursor-pointer hover:bg-slate-100/50 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={rememberChoice}
+                  onChange={(e) => setRememberChoice(e.target.checked)}
+                  className="w-4 h-4 rounded border-slate-300 text-blue-500 focus:ring-blue-500/20"
+                />
+                <span className="text-sm text-slate-600">记住我的选择，下次不再询问</span>
+              </label>
+            </div>
           </div>
         </div>
       )}
