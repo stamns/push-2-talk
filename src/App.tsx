@@ -196,6 +196,7 @@ function App() {
   const [updateInfo, setUpdateInfo] = useState<{ version: string; notes?: string } | null>(null);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
 
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
@@ -635,36 +636,21 @@ function App() {
           </div>
 
           <div className="flex items-center gap-2">
-            {/* 检查更新按钮 */}
+            {/* 设置按钮 */}
             <button
-              onClick={handleCheckUpdate}
-              disabled={updateStatus === "checking" || updateStatus === "downloading"}
-              className={`p-2 rounded-lg transition-all ${
+              onClick={() => setShowSettingsModal(true)}
+              className={`relative p-2 rounded-lg transition-all ${
                 updateStatus === "available"
-                  ? 'bg-green-100 text-green-600 hover:bg-green-200'
-                  : updateStatus === "checking"
-                  ? 'bg-blue-100 text-blue-600 animate-pulse'
-                  : 'bg-slate-100 text-slate-400 hover:bg-slate-200 hover:text-slate-500'
-              } disabled:opacity-50`}
-              title={updateStatus === "available" ? "有新版本可用" : "检查更新"}
-            >
-              {updateStatus === "checking" ? (
-                <RefreshCw size={18} className="animate-spin" />
-              ) : (
-                <Download size={18} />
-              )}
-            </button>
-            {/* 开机自启动按钮 */}
-            <button
-              onClick={handleAutostartToggle}
-              className={`p-2 rounded-lg transition-all ${
-                enableAutostart
                   ? 'bg-green-100 text-green-600 hover:bg-green-200'
                   : 'bg-slate-100 text-slate-400 hover:bg-slate-200 hover:text-slate-500'
               }`}
-              title={enableAutostart ? "开机自启动：已启用" : "开机自启动：已禁用"}
+              title="设置"
             >
-              <Power size={18} />
+              <Settings size={18} />
+              {/* 新版本红点提示 */}
+              {updateStatus === "available" && (
+                <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-white" />
+              )}
             </button>
             <button
               onClick={() => setShowHistory(true)}
@@ -1612,6 +1598,119 @@ function App() {
                   )}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Settings Modal - 匹配当前界面风格 */}
+      {showSettingsModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden animate-in zoom-in-95 duration-200">
+
+            {/* Modal Header - 与其他弹窗风格一致 */}
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-gradient-to-r from-slate-50 to-gray-50">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-slate-100 rounded-xl text-slate-600">
+                  <Settings size={20} />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900">设置</h3>
+                  <p className="text-xs text-slate-500">应用偏好设置</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowSettingsModal(false)}
+                className="p-2 hover:bg-slate-200 rounded-lg text-slate-500 hover:text-slate-700 transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-4 space-y-3">
+
+              {/* 开机自启动 */}
+              <div className="flex items-center justify-between p-4 bg-slate-50/80 rounded-xl border border-slate-100">
+                <div className="flex items-center gap-3">
+                  <div className={`p-2 rounded-lg transition-colors ${
+                    enableAutostart ? 'bg-green-100 text-green-600' : 'bg-slate-100 text-slate-400'
+                  }`}>
+                    <Power size={18} />
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-slate-700">开机自启动</div>
+                    <div className="text-xs text-slate-400">
+                      {enableAutostart ? '开机时自动启动应用' : '需要手动启动应用'}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  onClick={handleAutostartToggle}
+                  className={`relative w-14 h-7 rounded-full transition-all duration-300 ${
+                    enableAutostart ? 'bg-green-500' : 'bg-slate-300'
+                  } cursor-pointer hover:opacity-90`}
+                >
+                  <span className={`absolute top-0.5 w-6 h-6 bg-white rounded-full shadow-md transition-all duration-300 ${
+                    enableAutostart ? 'left-7' : 'left-0.5'
+                  }`} />
+                </button>
+              </div>
+
+              {/* 检查更新 */}
+              <button
+                onClick={() => {
+                  if (updateStatus === "available") {
+                    setShowSettingsModal(false);
+                    setShowUpdateModal(true);
+                  } else {
+                    handleCheckUpdate();
+                  }
+                }}
+                disabled={updateStatus === "checking" || updateStatus === "downloading"}
+                className="w-full flex items-center justify-between p-4 bg-slate-50/80 rounded-xl border border-slate-100 hover:border-slate-200 hover:bg-slate-100/80 transition-all disabled:opacity-60"
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`p-2 rounded-lg transition-colors ${
+                    updateStatus === "available"
+                      ? 'bg-green-100 text-green-600'
+                      : updateStatus === "checking"
+                      ? 'bg-blue-100 text-blue-600'
+                      : 'bg-slate-100 text-slate-400'
+                  }`}>
+                    {updateStatus === "checking" ? (
+                      <RefreshCw size={18} className="animate-spin" />
+                    ) : (
+                      <Download size={18} />
+                    )}
+                  </div>
+                  <div className="text-left">
+                    <div className="text-sm font-medium text-slate-700">检查更新</div>
+                    <div className="text-xs text-slate-400">
+                      {updateStatus === "available" && updateInfo
+                        ? `新版本 v${updateInfo.version} 可用`
+                        : updateStatus === "checking"
+                        ? '正在检查...'
+                        : '检查是否有新版本'}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {updateStatus === "available" && (
+                    <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+                  )}
+                  <svg width="8" height="14" viewBox="0 0 8 14" fill="none" className="text-slate-300">
+                    <path d="M1 1L7 7L1 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                </div>
+              </button>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-4 py-3 bg-slate-50/50 border-t border-slate-100">
+              <p className="text-xs text-slate-400 text-center">
+                按 Ctrl+Win 开始录音，松开后自动转写
+              </p>
             </div>
           </div>
         </div>

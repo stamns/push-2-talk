@@ -29,7 +29,10 @@
       "WebFetch(domain:api.github.com)",
       "Bash(git reset:*)",
       "Bash(git rm:*)",
-      "Bash(git tag:*)"
+      "Bash(git tag:*)",
+      "Bash(powershell -ExecutionPolicy Bypass -File bump-version.ps1 0.0.9)",
+      "Bash(powershell -Command \"Select-String -Pattern ''version'' -Path package.json,src-tauri\\Cargo.toml,src-tauri\\tauri.conf.json | Select-Object -First 3\")",
+      "Bash(powershell -Command \"(Get-Content src-tauri\\tauri.conf.json | Select-String ''version'').Line\")"
     ],
     "deny": [],
     "ask": []

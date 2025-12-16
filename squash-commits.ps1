@@ -1,0 +1,59 @@
+# Squash Commits Script
+# Usage: .\squash-commits.ps1
+
+# Step 1: Check for changes and commit if any
+$status = git status --porcelain
+if ($status) {
+    Write-Host "Adding all changes..." -ForegroundColor Cyan
+    git add .
+
+    Write-Host "Creating temporary commit..." -ForegroundColor Cyan
+    git commit -m "temp commit for squash"
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Commit failed." -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Host "No uncommitted changes, skipping add/commit step." -ForegroundColor Yellow
+}
+
+# Step 3: Show recent commits
+Write-Host "`nRecent commits:" -ForegroundColor Green
+git log --oneline -10
+
+# Step 4: Ask how many commits to squash
+Write-Host ""
+$count = Read-Host "How many commits do you want to squash?"
+
+if (-not ($count -match '^\d+$') -or [int]$count -lt 2) {
+    Write-Host "Invalid number. Must be at least 2." -ForegroundColor Red
+    exit 1
+}
+
+# Step 5: Ask for the new commit message
+Write-Host ""
+$message = Read-Host "Enter the new commit message"
+
+if ([string]::IsNullOrWhiteSpace($message)) {
+    Write-Host "Commit message cannot be empty." -ForegroundColor Red
+    exit 1
+}
+
+# Step 6: Perform the squash using soft reset
+Write-Host "`nSquashing $count commits..." -ForegroundColor Cyan
+
+# Soft reset to keep changes staged
+git reset --soft HEAD~$count
+
+# Create new commit with the provided message
+git commit -m "$message"
+
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "`nSquash completed successfully!" -ForegroundColor Green
+    Write-Host "New commit:" -ForegroundColor Green
+    git log --oneline -3
+} else {
+    Write-Host "Squash failed." -ForegroundColor Red
+    exit 1
+}
