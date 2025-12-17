@@ -30,11 +30,52 @@ import {
   Minus,
   Power,
   Download,
-  RefreshCw
+  RefreshCw,
+  Keyboard
 } from "lucide-react";
 import { nanoid } from 'nanoid';
 
 // --- 新的接口定义 ---
+
+// 热键类型定义
+type HotkeyKey =
+  | 'control_left' | 'control_right'
+  | 'shift_left' | 'shift_right'
+  | 'alt_left' | 'alt_right'
+  | 'meta_left' | 'meta_right'
+  | 'space' | 'tab' | 'caps_lock' | 'escape'
+  | 'f1' | 'f2' | 'f3' | 'f4' | 'f5' | 'f6' | 'f7' | 'f8' | 'f9' | 'f10' | 'f11' | 'f12'
+  | 'key_a' | 'key_b' | 'key_c' | 'key_d' | 'key_e' | 'key_f' | 'key_g' | 'key_h' | 'key_i' | 'key_j'
+  | 'key_k' | 'key_l' | 'key_m' | 'key_n' | 'key_o' | 'key_p' | 'key_q' | 'key_r' | 'key_s' | 'key_t'
+  | 'key_u' | 'key_v' | 'key_w' | 'key_x' | 'key_y' | 'key_z'
+  | 'num_0' | 'num_1' | 'num_2' | 'num_3' | 'num_4' | 'num_5' | 'num_6' | 'num_7' | 'num_8' | 'num_9'
+  | 'up' | 'down' | 'left' | 'right'
+  | 'return' | 'backspace' | 'delete' | 'insert' | 'home' | 'end' | 'page_up' | 'page_down';
+
+interface HotkeyConfig {
+  keys: HotkeyKey[];
+}
+
+// 按键显示名称映射
+const KEY_DISPLAY_NAMES: Record<HotkeyKey, string> = {
+  control_left: 'Ctrl', control_right: 'Ctrl(右)',
+  shift_left: 'Shift', shift_right: 'Shift(右)',
+  alt_left: 'Alt', alt_right: 'Alt(右)',
+  meta_left: 'Win', meta_right: 'Win(右)',
+  space: 'Space', tab: 'Tab', caps_lock: 'CapsLock', escape: 'Esc',
+  f1: 'F1', f2: 'F2', f3: 'F3', f4: 'F4', f5: 'F5', f6: 'F6',
+  f7: 'F7', f8: 'F8', f9: 'F9', f10: 'F10', f11: 'F11', f12: 'F12',
+  key_a: 'A', key_b: 'B', key_c: 'C', key_d: 'D', key_e: 'E', key_f: 'F',
+  key_g: 'G', key_h: 'H', key_i: 'I', key_j: 'J', key_k: 'K', key_l: 'L',
+  key_m: 'M', key_n: 'N', key_o: 'O', key_p: 'P', key_q: 'Q', key_r: 'R',
+  key_s: 'S', key_t: 'T', key_u: 'U', key_v: 'V', key_w: 'W', key_x: 'X',
+  key_y: 'Y', key_z: 'Z',
+  num_0: '0', num_1: '1', num_2: '2', num_3: '3', num_4: '4',
+  num_5: '5', num_6: '6', num_7: '7', num_8: '8', num_9: '9',
+  up: '↑', down: '↓', left: '←', right: '→',
+  return: 'Enter', backspace: 'Backspace', delete: 'Delete', insert: 'Insert',
+  home: 'Home', end: 'End', page_up: 'PageUp', page_down: 'PageDown',
+};
 
 type AsrProvider = 'qwen' | 'doubao' | 'siliconflow';
 
@@ -73,6 +114,7 @@ interface AppConfig {
   enable_llm_post_process: boolean;
   llm_config: LlmConfig;
   close_action: "close" | "minimize" | null;
+  hotkey_config: HotkeyConfig;
 }
 
 interface TranscriptionResult {
@@ -197,6 +239,10 @@ function App() {
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [hotkeyConfig, setHotkeyConfig] = useState<HotkeyConfig>({ keys: ['control_left', 'meta_left'] });
+  const [isRecordingHotkey, setIsRecordingHotkey] = useState(false);
+  const [recordingKeys, setRecordingKeys] = useState<HotkeyKey[]>([]); // 录制时实时显示的按键
+  const [hotkeyError, setHotkeyError] = useState<string | null>(null);
 
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
@@ -237,6 +283,85 @@ function App() {
     };
   }, [status]);
 
+  // 热键录制监听
+  useEffect(() => {
+    if (!isRecordingHotkey) {
+      setRecordingKeys([]); // 清空录制状态
+      return;
+    }
+
+    console.log("开始热键录制监听");
+    const pressedKeysSet = new Set<HotkeyKey>();
+    let hasRecordedKeys = false; // 标记是否已经录制到按键
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      console.log("KeyDown:", e.key, e.code, e.location);
+      const key = mapDomKeyToHotkeyKey(e);
+      console.log("Mapped key:", key);
+      if (key && !pressedKeysSet.has(key)) {
+        pressedKeysSet.add(key);
+        hasRecordedKeys = true;
+        // 立即更新 UI 显示
+        setRecordingKeys(Array.from(pressedKeysSet));
+        console.log("当前按下的键:", Array.from(pressedKeysSet));
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      console.log("KeyUp:", e.key, e.code, "hasRecordedKeys:", hasRecordedKeys, "size:", pressedKeysSet.size);
+
+      // 只有录制到按键后，松开任意键才结束录制
+      if (hasRecordedKeys && pressedKeysSet.size > 0) {
+        const keysArray = Array.from(pressedKeysSet);
+        console.log("准备保存的按键:", keysArray);
+
+        // 验证：必须有修饰键或功能键
+        const hasModifier = keysArray.some(k => isModifierKey(k));
+        const isFunctionKey = keysArray.every(k => /^f([1-9]|1[0-2])$/.test(k));
+        console.log("是否包含修饰键:", hasModifier, "是否为功能键:", isFunctionKey);
+
+        if (hasModifier || isFunctionKey) {
+          setHotkeyConfig({ keys: keysArray });
+          setHotkeyError(null);
+          // 保存配置
+          invoke<string>("save_config", {
+            apiKey,
+            fallbackApiKey,
+            useRealtime,
+            enablePostProcess,
+            llmConfig,
+            asrConfig,
+            hotkeyConfig: { keys: keysArray }
+          }).then(() => {
+            console.log("热键配置已保存:", keysArray);
+          }).catch(err => {
+            console.error("保存热键配置失败:", err);
+          });
+        } else {
+          setHotkeyError("必须包含修饰键(Ctrl/Alt/Shift/Win) 或 功能键(F1-F12)");
+          setTimeout(() => setHotkeyError(null), 3000);
+        }
+
+        setIsRecordingHotkey(false);
+        setRecordingKeys([]);
+      }
+    };
+
+    // 使用 capture 阶段捕获事件
+    window.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('keyup', handleKeyUp, true);
+
+    return () => {
+      console.log("停止热键录制监听");
+      window.removeEventListener('keydown', handleKeyDown, true);
+      window.removeEventListener('keyup', handleKeyUp, true);
+    };
+  }, [isRecordingHotkey, apiKey, fallbackApiKey, useRealtime, enablePostProcess, llmConfig, asrConfig]);
+
   const loadConfig = async () => {
     try {
       const config = await invoke<AppConfig>("load_config");
@@ -262,6 +387,11 @@ function App() {
 
       setLlmConfig(loadedLlmConfig);
 
+      // 加载热键配置
+      if (config.hotkey_config && config.hotkey_config.keys.length > 0) {
+        setHotkeyConfig(config.hotkey_config);
+      }
+
       // 加载关闭行为配置
       if (config.close_action) {
         setCloseAction(config.close_action);
@@ -275,21 +405,24 @@ function App() {
         console.error("获取开机自启状态失败:", err);
       }
 
-      // 自动启动时也需要传递 asrConfig
+      // 自动启动时也需要传递 asrConfig 和 hotkeyConfig
       const loadedAsrConfig = config.asr_config || null;
+      const loadedHotkeyConfig = config.hotkey_config && config.hotkey_config.keys.length > 0
+        ? config.hotkey_config
+        : { keys: ['control_left', 'meta_left'] as HotkeyKey[] };
 
       if (config.dashscope_api_key && config.dashscope_api_key.trim() !== "") {
-        autoStartApp(config.dashscope_api_key, config.siliconflow_api_key || "", config.use_realtime_asr ?? true, config.enable_llm_post_process ?? false, loadedLlmConfig, loadedAsrConfig);
+        autoStartApp(config.dashscope_api_key, config.siliconflow_api_key || "", config.use_realtime_asr ?? true, config.enable_llm_post_process ?? false, loadedLlmConfig, loadedAsrConfig, loadedHotkeyConfig);
       }
     } catch (err) {
       console.error("加载配置失败:", err);
     }
   };
 
-  const autoStartApp = async (apiKey: string, fallbackApiKey: string, useRealtimeMode: boolean, enablePostProcessMode: boolean, llmCfg: LlmConfig, asrCfg: AsrConfig | null) => {
+  const autoStartApp = async (apiKey: string, fallbackApiKey: string, useRealtimeMode: boolean, enablePostProcessMode: boolean, llmCfg: LlmConfig, asrCfg: AsrConfig | null, hotkeyCfg: HotkeyConfig) => {
     try {
       await new Promise(resolve => setTimeout(resolve, 100));
-      await invoke<string>("start_app", { apiKey, fallbackApiKey, useRealtime: useRealtimeMode, enablePostProcess: enablePostProcessMode, llmConfig: llmCfg, asrConfig: asrCfg });
+      await invoke<string>("start_app", { apiKey, fallbackApiKey, useRealtime: useRealtimeMode, enablePostProcess: enablePostProcessMode, llmConfig: llmCfg, asrConfig: asrCfg, hotkeyConfig: hotkeyCfg });
       setStatus("running");
       setError(null);
     } catch (err) {
@@ -391,7 +524,15 @@ function App() {
 
   const handleSaveConfig = async () => {
     try {
-      await invoke<string>("save_config", { apiKey, fallbackApiKey, useRealtime, enablePostProcess, llmConfig, asrConfig });
+      await invoke<string>("save_config", {
+        apiKey,
+        fallbackApiKey,
+        useRealtime,
+        enablePostProcess,
+        llmConfig,
+        asrConfig,
+        hotkeyConfig
+      });
       setError(null);
       setShowSuccessToast(true);
       setTimeout(() => setShowSuccessToast(false), 3000);
@@ -515,8 +656,8 @@ function App() {
           setError("请先配置 ASR API Key");
           return;
         }
-        await invoke<string>("save_config", { apiKey, fallbackApiKey, useRealtime, enablePostProcess, llmConfig, asrConfig, closeAction });
-        await invoke<string>("start_app", { apiKey, fallbackApiKey, useRealtime, enablePostProcess, llmConfig, asrConfig });
+        await invoke<string>("save_config", { apiKey, fallbackApiKey, useRealtime, enablePostProcess, llmConfig, asrConfig, closeAction, hotkeyConfig });
+        await invoke<string>("start_app", { apiKey, fallbackApiKey, useRealtime, enablePostProcess, llmConfig, asrConfig, hotkeyConfig });
         setStatus("running");
         setError(null);
       } else {
@@ -548,6 +689,7 @@ function App() {
           llmConfig,
           asrConfig,
           closeAction: action,
+          hotkeyConfig,
         });
       } catch (err) {
         console.error("保存关闭配置失败:", err);
@@ -560,6 +702,74 @@ function App() {
     } else {
       await invoke("hide_to_tray");
     }
+  };
+
+  // 热键相关辅助函数
+  const mapDomKeyToHotkeyKey = (e: KeyboardEvent): HotkeyKey | null => {
+    const { key, code, location } = e;
+
+    // 修饰键（带位置）
+    if (key === 'Control') return location === 1 ? 'control_left' : 'control_right';
+    if (key === 'Shift') return location === 1 ? 'shift_left' : 'shift_right';
+    if (key === 'Alt') return location === 1 ? 'alt_left' : 'alt_right';
+    if (key === 'Meta') return location === 1 ? 'meta_left' : 'meta_right';
+
+    // 特殊键
+    if (key === ' ') return 'space';
+    if (key === 'Tab') return 'tab';
+    if (key === 'Escape') return 'escape';
+    if (key === 'CapsLock') return 'caps_lock';
+
+    // 功能键
+    if (/^F([1-9]|1[0-2])$/.test(key)) {
+      return `f${key.slice(1).toLowerCase()}` as HotkeyKey;
+    }
+
+    // 字母键
+    if (/^Key[A-Z]$/.test(code)) {
+      return `key_${code.slice(3).toLowerCase()}` as HotkeyKey;
+    }
+
+    // 数字键 (Top Row)
+    if (/^Digit[0-9]$/.test(code)) {
+      return `num_${code.slice(5)}` as HotkeyKey;
+    }
+
+    // 小键盘数字键 (Numpad)
+    if (/^Numpad[0-9]$/.test(code)) {
+      return `num_${code.slice(6)}` as HotkeyKey;
+    }
+
+    // 方向键
+    if (key === 'ArrowUp') return 'up';
+    if (key === 'ArrowDown') return 'down';
+    if (key === 'ArrowLeft') return 'left';
+    if (key === 'ArrowRight') return 'right';
+
+    // 编辑键
+    if (key === 'Enter') return 'return';
+    if (key === 'Backspace') return 'backspace';
+    if (key === 'Delete') return 'delete';
+    if (key === 'Insert') return 'insert';
+    if (key === 'Home') return 'home';
+    if (key === 'End') return 'end';
+    if (key === 'PageUp') return 'page_up';
+    if (key === 'PageDown') return 'page_down';
+
+    return null;
+  };
+
+  const isModifierKey = (key: HotkeyKey): boolean => {
+    return ['control_left', 'control_right', 'shift_left', 'shift_right', 'alt_left', 'alt_right', 'meta_left', 'meta_right'].includes(key);
+  };
+
+  const formatHotkeyDisplay = (config: HotkeyConfig): string => {
+    return config.keys.map(k => KEY_DISPLAY_NAMES[k] || k).join(' + ');
+  };
+
+  const resetHotkeyToDefault = () => {
+    setHotkeyConfig({ keys: ['control_left', 'meta_left'] });
+    handleSaveConfig();
   };
 
   // --- 预设管理函数 ---
@@ -680,7 +890,7 @@ function App() {
               <span>
                 {isRecording ? `正在录音 ${formatTime(recordingTime)}` :
                  isTranscribing ? "AI 转写中..." :
-                 status === "running" ? "运行中 (Ctrl+Win)" : "已停止"}
+                 status === "running" ? `运行中 (${formatHotkeyDisplay(hotkeyConfig)})` : "已停止"}
               </span>
             </div>
             {(isRecording || isTranscribing) && (
@@ -1630,6 +1840,75 @@ function App() {
             {/* Modal Body */}
             <div className="p-4 space-y-3">
 
+              {/* 快捷键配置 */}
+              <div className="p-4 bg-slate-50/80 rounded-xl border border-slate-100">
+                <div className="flex items-center gap-3 mb-3">
+                  <div className={`p-2 rounded-lg transition-colors ${
+                    isRecordingHotkey ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-400'
+                  }`}>
+                    <Keyboard size={18} />
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-slate-700">快捷键</div>
+                    <div className="text-xs text-slate-400">
+                      点击下方区域录制新的快捷键组合
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  onClick={() => status === 'idle' && setIsRecordingHotkey(true)}
+                  className={`flex items-center gap-2 p-3 bg-white border rounded-xl cursor-pointer transition-all min-h-[44px] ${
+                    isRecordingHotkey
+                      ? 'border-blue-500 ring-2 ring-blue-200'
+                      : 'border-slate-200 hover:border-slate-300'
+                  } ${status !== 'idle' ? 'opacity-50 cursor-not-allowed' : ''}`}
+                >
+                  <div className="flex-1 flex flex-wrap gap-1.5">
+                    {isRecordingHotkey ? (
+                      recordingKeys.length > 0 ? (
+                        recordingKeys.map(key => (
+                          <span key={key} className="px-2.5 py-1 bg-blue-100 text-blue-700 text-xs font-medium rounded-md">
+                            {KEY_DISPLAY_NAMES[key]}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="text-sm text-blue-600 animate-pulse">按下快捷键...</span>
+                      )
+                    ) : (
+                      hotkeyConfig.keys.map(key => (
+                        <span key={key} className="px-2.5 py-1 bg-slate-100 text-slate-700 text-xs font-medium rounded-md">
+                          {KEY_DISPLAY_NAMES[key]}
+                        </span>
+                      ))
+                    )}
+                  </div>
+
+                  <button
+                    onClick={(e) => { e.stopPropagation(); resetHotkeyToDefault(); }}
+                    disabled={status !== 'idle'}
+                    className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors disabled:opacity-50"
+                    title="重置为默认 (Ctrl+Win)"
+                  >
+                    <RotateCcw size={14} />
+                  </button>
+                </div>
+
+                {hotkeyError && (
+                  <div className="mt-2 flex items-center gap-1.5 p-2 bg-red-50 border border-red-100 rounded-lg text-xs text-red-600 animate-in slide-in-from-top-2 fade-in duration-200">
+                    <AlertCircle size={12} className="flex-shrink-0" />
+                    <span>{hotkeyError}</span>
+                  </div>
+                )}
+
+                {status !== 'idle' && (
+                  <div className="mt-2 flex items-center gap-1.5 text-xs text-amber-600">
+                    <AlertCircle size={12} />
+                    <span>请先停止服务后再修改快捷键</span>
+                  </div>
+                )}
+              </div>
+
               {/* 开机自启动 */}
               <div className="flex items-center justify-between p-4 bg-slate-50/80 rounded-xl border border-slate-100">
                 <div className="flex items-center gap-3">
@@ -1709,7 +1988,7 @@ function App() {
             {/* Modal Footer */}
             <div className="px-4 py-3 bg-slate-50/50 border-t border-slate-100">
               <p className="text-xs text-slate-400 text-center">
-                按 Ctrl+Win 开始录音，松开后自动转写
+                按 {formatHotkeyDisplay(hotkeyConfig)} 开始录音，松开后自动转写
               </p>
             </div>
           </div>

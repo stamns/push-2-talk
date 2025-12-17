@@ -2,7 +2,164 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::collections::HashSet;
 use anyhow::Result;
+
+/// 热键配置支持的按键类型
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum HotkeyKey {
+    // 修饰键
+    ControlLeft,
+    ControlRight,
+    ShiftLeft,
+    ShiftRight,
+    AltLeft,
+    AltRight,
+    MetaLeft,   // Win/Cmd 左
+    MetaRight,  // Win/Cmd 右
+
+    // 功能键
+    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+
+    // 常用键
+    Space,
+    Tab,
+    CapsLock,
+    Escape,
+
+    // 字母键
+    KeyA, KeyB, KeyC, KeyD, KeyE, KeyF, KeyG, KeyH, KeyI, KeyJ,
+    KeyK, KeyL, KeyM, KeyN, KeyO, KeyP, KeyQ, KeyR, KeyS, KeyT,
+    KeyU, KeyV, KeyW, KeyX, KeyY, KeyZ,
+
+    // 数字键
+    Num0, Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9,
+
+    // 方向键
+    Up, Down, Left, Right,
+
+    // 编辑键
+    Return, Backspace, Delete, Insert, Home, End, PageUp, PageDown,
+}
+
+impl HotkeyKey {
+    /// 判断是否为修饰键
+    pub fn is_modifier(&self) -> bool {
+        matches!(self,
+            HotkeyKey::ControlLeft | HotkeyKey::ControlRight |
+            HotkeyKey::ShiftLeft | HotkeyKey::ShiftRight |
+            HotkeyKey::AltLeft | HotkeyKey::AltRight |
+            HotkeyKey::MetaLeft | HotkeyKey::MetaRight
+        )
+    }
+
+    /// 判断是否为功能键
+    pub fn is_function_key(&self) -> bool {
+        matches!(self,
+            HotkeyKey::F1 | HotkeyKey::F2 | HotkeyKey::F3 | HotkeyKey::F4 |
+            HotkeyKey::F5 | HotkeyKey::F6 | HotkeyKey::F7 | HotkeyKey::F8 |
+            HotkeyKey::F9 | HotkeyKey::F10 | HotkeyKey::F11 | HotkeyKey::F12
+        )
+    }
+
+    /// 获取显示名称（用于日志和调试）
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            HotkeyKey::ControlLeft => "Ctrl(左)",
+            HotkeyKey::ControlRight => "Ctrl(右)",
+            HotkeyKey::ShiftLeft => "Shift(左)",
+            HotkeyKey::ShiftRight => "Shift(右)",
+            HotkeyKey::AltLeft => "Alt(左)",
+            HotkeyKey::AltRight => "Alt(右)",
+            HotkeyKey::MetaLeft => "Win(左)",
+            HotkeyKey::MetaRight => "Win(右)",
+            HotkeyKey::Space => "Space",
+            HotkeyKey::Tab => "Tab",
+            HotkeyKey::CapsLock => "CapsLock",
+            HotkeyKey::Escape => "Esc",
+            HotkeyKey::F1 => "F1", HotkeyKey::F2 => "F2", HotkeyKey::F3 => "F3",
+            HotkeyKey::F4 => "F4", HotkeyKey::F5 => "F5", HotkeyKey::F6 => "F6",
+            HotkeyKey::F7 => "F7", HotkeyKey::F8 => "F8", HotkeyKey::F9 => "F9",
+            HotkeyKey::F10 => "F10", HotkeyKey::F11 => "F11", HotkeyKey::F12 => "F12",
+            HotkeyKey::KeyA => "A", HotkeyKey::KeyB => "B", HotkeyKey::KeyC => "C",
+            HotkeyKey::KeyD => "D", HotkeyKey::KeyE => "E", HotkeyKey::KeyF => "F",
+            HotkeyKey::KeyG => "G", HotkeyKey::KeyH => "H", HotkeyKey::KeyI => "I",
+            HotkeyKey::KeyJ => "J", HotkeyKey::KeyK => "K", HotkeyKey::KeyL => "L",
+            HotkeyKey::KeyM => "M", HotkeyKey::KeyN => "N", HotkeyKey::KeyO => "O",
+            HotkeyKey::KeyP => "P", HotkeyKey::KeyQ => "Q", HotkeyKey::KeyR => "R",
+            HotkeyKey::KeyS => "S", HotkeyKey::KeyT => "T", HotkeyKey::KeyU => "U",
+            HotkeyKey::KeyV => "V", HotkeyKey::KeyW => "W", HotkeyKey::KeyX => "X",
+            HotkeyKey::KeyY => "Y", HotkeyKey::KeyZ => "Z",
+            HotkeyKey::Num0 => "0", HotkeyKey::Num1 => "1", HotkeyKey::Num2 => "2",
+            HotkeyKey::Num3 => "3", HotkeyKey::Num4 => "4", HotkeyKey::Num5 => "5",
+            HotkeyKey::Num6 => "6", HotkeyKey::Num7 => "7", HotkeyKey::Num8 => "8",
+            HotkeyKey::Num9 => "9",
+            HotkeyKey::Up => "↑", HotkeyKey::Down => "↓",
+            HotkeyKey::Left => "←", HotkeyKey::Right => "→",
+            HotkeyKey::Return => "Enter", HotkeyKey::Backspace => "Backspace",
+            HotkeyKey::Delete => "Delete", HotkeyKey::Insert => "Insert",
+            HotkeyKey::Home => "Home", HotkeyKey::End => "End",
+            HotkeyKey::PageUp => "PageUp", HotkeyKey::PageDown => "PageDown",
+        }
+    }
+}
+
+/// 热键配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotkeyConfig {
+    /// 需要同时按下的按键列表
+    pub keys: Vec<HotkeyKey>,
+}
+
+impl Default for HotkeyConfig {
+    fn default() -> Self {
+        // 默认为 Ctrl+Win（向后兼容）
+        Self {
+            keys: vec![HotkeyKey::ControlLeft, HotkeyKey::MetaLeft],
+        }
+    }
+}
+
+impl HotkeyConfig {
+    /// 检查是否包含至少一个修饰键
+    pub fn has_modifier(&self) -> bool {
+        self.keys.iter().any(|k| k.is_modifier())
+    }
+
+    /// 验证热键配置是否有效
+    pub fn validate(&self) -> Result<()> {
+        if self.keys.is_empty() {
+            anyhow::bail!("热键配置不能为空");
+        }
+
+        // 允许功能键单独使用，其他按键必须配合修饰键
+        let has_function_key = self.keys.iter().any(|k| k.is_function_key());
+        if !self.has_modifier() && !has_function_key {
+            anyhow::bail!("热键必须包含至少一个修饰键 (Ctrl/Alt/Shift/Win) 或使用功能键 (F1-F12)");
+        }
+
+        if self.keys.len() > 4 {
+            anyhow::bail!("热键最多支持4个按键组合");
+        }
+
+        // 检查是否有重复按键
+        let unique_keys: HashSet<_> = self.keys.iter().collect();
+        if unique_keys.len() != self.keys.len() {
+            anyhow::bail!("热键配置中存在重复的按键");
+        }
+
+        Ok(())
+    }
+
+    /// 格式化为显示字符串（用于日志）
+    pub fn format_display(&self) -> String {
+        self.keys.iter()
+            .map(|k| k.display_name())
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -64,6 +221,9 @@ pub struct AppConfig {
     /// 关闭行为: "close" = 直接关闭, "minimize" = 最小化到托盘, None = 每次询问
     #[serde(default)]
     pub close_action: Option<String>,
+    /// 热键配置（默认 Ctrl+Win）
+    #[serde(default)]
+    pub hotkey_config: HotkeyConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +304,7 @@ impl AppConfig {
             enable_llm_post_process: false,
             llm_config: LlmConfig::default(),
             close_action: None,
+            hotkey_config: HotkeyConfig::default(),
         }
     }
 

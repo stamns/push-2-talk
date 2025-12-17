@@ -2,6 +2,7 @@
 # 用法: 
 #   .\tag-release.ps1           (运行后根据提示选择模式)
 #   .\tag-release.ps1 v0.0.8    (带版本号运行，如果是测试模式会忽略版本号)
+# $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content .tauri\keys\private.key -Raw
 
 param(
     [Parameter(Mandatory=$false, Position=0)]

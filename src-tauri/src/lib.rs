@@ -36,6 +36,7 @@ struct AppState {
     is_running: Arc<Mutex<bool>>,
     use_realtime_asr: Arc<Mutex<bool>>,
     enable_post_process: Arc<Mutex<bool>>,
+    enable_fallback: Arc<Mutex<bool>>,
     qwen_client: Arc<Mutex<Option<QwenASRClient>>>,
     sensevoice_client: Arc<Mutex<Option<SenseVoiceClient>>>,
     doubao_client: Arc<Mutex<Option<DoubaoASRClient>>>,
@@ -45,6 +46,8 @@ struct AppState {
     realtime_provider: Arc<Mutex<Option<config::AsrProvider>>>,
     // 音频发送任务句柄
     audio_sender_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    // 单例热键服务
+    hotkey_service: Arc<HotkeyService>,
 }
 
 // Tauri Commands
@@ -58,6 +61,7 @@ async fn save_config(
     llm_config: Option<config::LlmConfig>,
     close_action: Option<String>,
     asr_config: Option<config::AsrConfig>,
+    hotkey_config: Option<config::HotkeyConfig>,
 ) -> Result<String, String> {
     tracing::info!("保存配置...");
     let has_fallback = !fallback_api_key.is_empty();
@@ -87,6 +91,7 @@ async fn save_config(
         enable_llm_post_process: enable_post_process.unwrap_or(false),
         llm_config: llm_config.unwrap_or_default(),
         close_action,
+        hotkey_config: hotkey_config.unwrap_or_default(),
     };
 
     config
@@ -102,6 +107,212 @@ async fn load_config() -> Result<AppConfig, String> {
     AppConfig::load().map_err(|e| format!("加载配置失败: {}", e))
 }
 
+/// 处理录音开始的核心逻辑
+async fn handle_recording_start(
+    app: AppHandle,
+    recorder: Arc<Mutex<Option<AudioRecorder>>>,
+    streaming_recorder: Arc<Mutex<Option<StreamingRecorder>>>,
+    active_session: Arc<tokio::sync::Mutex<Option<RealtimeSession>>>,
+    doubao_session: Arc<tokio::sync::Mutex<Option<DoubaoRealtimeSession>>>,
+    realtime_provider: Arc<Mutex<Option<config::AsrProvider>>>,
+    audio_sender_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    use_realtime: bool,
+    api_key: String,
+    doubao_app_id: Option<String>,
+    doubao_access_token: Option<String>,
+) {
+    tracing::info!("检测到快捷键按下");
+    let _ = app.emit("recording_started", ());
+
+    // 显示录音悬浮窗并移动到屏幕底部居中
+    if let Some(overlay) = app.get_webview_window("overlay") {
+        if let Some(monitor) = overlay.primary_monitor().ok().flatten() {
+            let screen_size = monitor.size();
+            let scale_factor = monitor.scale_factor();
+            let overlay_size = overlay.outer_size().unwrap_or(tauri::PhysicalSize::new(120, 44));
+
+            let x = ((screen_size.width as f64 / scale_factor) / 2.0 - (overlay_size.width as f64 / scale_factor) / 2.0) as i32;
+            let y = ((screen_size.height as f64 / scale_factor) - (overlay_size.height as f64 / scale_factor) - 100.0) as i32;
+
+            let _ = overlay.set_position(tauri::PhysicalPosition::new(
+                (x as f64 * scale_factor) as i32,
+                (y as f64 * scale_factor) as i32
+            ));
+        }
+        let _ = overlay.show();
+    }
+
+    if use_realtime {
+        let provider = realtime_provider.lock().unwrap().clone();
+        match provider {
+            Some(config::AsrProvider::Doubao) => {
+                handle_doubao_realtime_start(app, streaming_recorder, doubao_session, audio_sender_handle, doubao_app_id, doubao_access_token).await;
+            }
+            _ => {
+                handle_qwen_realtime_start(app, streaming_recorder, active_session, audio_sender_handle, api_key).await;
+            }
+        }
+    } else {
+        let mut recorder_guard = recorder.lock().unwrap();
+        if let Some(ref mut rec) = *recorder_guard {
+            if let Err(e) = rec.start_recording(Some(app.clone())) {
+                emit_error_and_hide_overlay(&app, format!("录音失败: {}", e));
+            }
+        } else {
+            emit_error_and_hide_overlay(&app, "录音器未初始化".to_string());
+        }
+    }
+}
+
+/// 处理豆包实时模式启动
+async fn handle_doubao_realtime_start(
+    app: AppHandle,
+    streaming_recorder: Arc<Mutex<Option<StreamingRecorder>>>,
+    doubao_session: Arc<tokio::sync::Mutex<Option<DoubaoRealtimeSession>>>,
+    audio_sender_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    doubao_app_id: Option<String>,
+    doubao_access_token: Option<String>,
+) {
+    tracing::info!("启动豆包实时流式转录...");
+
+    let chunk_rx = {
+        let mut streaming_guard = streaming_recorder.lock().unwrap();
+        if let Some(ref mut rec) = *streaming_guard {
+            match rec.start_streaming(Some(app.clone())) {
+                Ok(rx) => Some(rx),
+                Err(e) => {
+                    emit_error_and_hide_overlay(&app, format!("录音失败: {}", e));
+                    None
+                }
+            }
+        } else {
+            emit_error_and_hide_overlay(&app, "流式录音器未初始化".to_string());
+            None
+        }
+    };
+
+    if let Some(chunk_rx) = chunk_rx {
+        if let (Some(app_id), Some(access_token)) = (doubao_app_id.as_ref(), doubao_access_token.as_ref()) {
+            let realtime_client = DoubaoRealtimeClient::new(app_id.clone(), access_token.clone());
+            match realtime_client.start_session().await {
+                Ok(session) => {
+                    tracing::info!("豆包 WebSocket 连接已建立");
+                    *doubao_session.lock().await = Some(session);
+
+                    let session_for_sender = Arc::clone(&doubao_session);
+                    let sender_handle = tokio::spawn(async move {
+                        tracing::info!("豆包音频发送任务启动");
+                        let mut chunk_count = 0;
+
+                        while let Ok(chunk) = chunk_rx.recv() {
+                            let mut session_guard = session_for_sender.lock().await;
+                            if let Some(ref mut session) = *session_guard {
+                                if let Err(e) = session.send_audio_chunk(&chunk).await {
+                                    tracing::error!("发送音频块失败: {}", e);
+                                    break;
+                                }
+                                chunk_count += 1;
+                                if chunk_count % 10 == 0 {
+                                    tracing::debug!("已发送 {} 个音频块", chunk_count);
+                                }
+                            } else {
+                                break;
+                            }
+                            drop(session_guard);
+                        }
+
+                        tracing::info!("豆包音频发送任务结束，共发送 {} 个块", chunk_count);
+                    });
+
+                    *audio_sender_handle.lock().unwrap() = Some(sender_handle);
+                }
+                Err(e) => {
+                    tracing::error!("建立豆包 WebSocket 连接失败: {}，录音已启动，将使用备用方案", e);
+                }
+            }
+        } else {
+            tracing::error!("豆包凭证缺失：需要 app_id 和 access_token");
+        }
+    }
+}
+
+/// 处理千问实时模式启动
+async fn handle_qwen_realtime_start(
+    app: AppHandle,
+    streaming_recorder: Arc<Mutex<Option<StreamingRecorder>>>,
+    active_session: Arc<tokio::sync::Mutex<Option<RealtimeSession>>>,
+    audio_sender_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    api_key: String,
+) {
+    tracing::info!("启动千问实时流式转录...");
+
+    let realtime_client = QwenRealtimeClient::new(api_key);
+    match realtime_client.start_session().await {
+        Ok(session) => {
+            tracing::info!("千问 WebSocket 连接已建立");
+
+            let chunk_rx = {
+                let mut streaming_guard = streaming_recorder.lock().unwrap();
+                if let Some(ref mut rec) = *streaming_guard {
+                    match rec.start_streaming(Some(app.clone())) {
+                        Ok(rx) => Some(rx),
+                        Err(e) => {
+                            emit_error_and_hide_overlay(&app, format!("录音失败: {}", e));
+                            None
+                        }
+                    }
+                } else {
+                    emit_error_and_hide_overlay(&app, "流式录音器未初始化".to_string());
+                    None
+                }
+            };
+
+            if let Some(chunk_rx) = chunk_rx {
+                *active_session.lock().await = Some(session);
+
+                let session_for_sender = Arc::clone(&active_session);
+                let sender_handle = tokio::spawn(async move {
+                    tracing::info!("千问音频发送任务启动");
+                    let mut chunk_count = 0;
+
+                    while let Ok(chunk) = chunk_rx.recv() {
+                        let session_guard = session_for_sender.lock().await;
+                        if let Some(ref session) = *session_guard {
+                            if let Err(e) = session.send_audio_chunk(&chunk).await {
+                                tracing::error!("发送音频块失败: {}", e);
+                                break;
+                            }
+                            chunk_count += 1;
+                            if chunk_count % 10 == 0 {
+                                tracing::debug!("已发送 {} 个音频块", chunk_count);
+                            }
+                        } else {
+                            break;
+                        }
+                        drop(session_guard);
+                    }
+
+                    tracing::info!("千问音频发送任务结束，共发送 {} 个块", chunk_count);
+                });
+
+                *audio_sender_handle.lock().unwrap() = Some(sender_handle);
+            }
+        }
+        Err(e) => {
+            tracing::error!("建立千问 WebSocket 连接失败: {}，回退到普通录音", e);
+
+            let mut streaming_guard = streaming_recorder.lock().unwrap();
+            if let Some(ref mut rec) = *streaming_guard {
+                if let Err(e) = rec.start_streaming(Some(app.clone())) {
+                    emit_error_and_hide_overlay(&app, format!("录音失败: {}", e));
+                }
+            } else {
+                emit_error_and_hide_overlay(&app, "录音器未初始化".to_string());
+            }
+        }
+    }
+}
+
 #[tauri::command]
 async fn start_app(
     app_handle: AppHandle,
@@ -111,6 +322,7 @@ async fn start_app(
     enable_post_process: Option<bool>,
     llm_config: Option<config::LlmConfig>,
     asr_config: Option<config::AsrConfig>,
+    hotkey_config: Option<config::HotkeyConfig>,
 ) -> Result<String, String> {
     tracing::info!("启动应用...");
 
@@ -193,6 +405,16 @@ async fn start_app(
         }
     }
 
+    // 存储 fallback 配置
+    {
+        let enable_fb = asr_config
+            .as_ref()
+            .map(|c| c.enable_fallback)
+            .unwrap_or(false);
+        *state.enable_fallback.lock().unwrap() = enable_fb;
+        tracing::info!("并行 fallback: {}", if enable_fb { "启用" } else { "禁用" });
+    }
+
     // 初始化 LLM 后处理器（复用连接）
     {
         let mut processor_guard = state.post_processor.lock().unwrap();
@@ -229,7 +451,13 @@ async fn start_app(
     }
 
     // 启动全局快捷键监听
-    let hotkey_service = HotkeyService::new();
+    let hotkey_cfg = hotkey_config.unwrap_or_default();
+
+    // 验证热键配置
+    hotkey_cfg.validate()
+        .map_err(|e| format!("热键配置无效: {}", e))?;
+
+    let hotkey_service = Arc::clone(&state.hotkey_service);
 
     // 克隆状态用于回调
     let app_handle_start = app_handle.clone();
@@ -271,14 +499,16 @@ async fn start_app(
     let realtime_provider_stop = Arc::clone(&state.realtime_provider);
     let use_realtime_stop = use_realtime_mode;
     let is_running_stop = Arc::clone(&state.is_running);
+    let enable_fallback_stop = Arc::clone(&state.enable_fallback);
 
     // 按键按下回调
     let on_start = move || {
-        // 检查服务是否仍在运行
         if !*is_running_start.lock().unwrap() {
             tracing::debug!("服务已停止，忽略快捷键按下事件");
             return;
         }
+
+        beep_player::play_start_beep();
 
         let app = app_handle_start.clone();
         let recorder = Arc::clone(&audio_recorder_start);
@@ -292,198 +522,20 @@ async fn start_app(
         let doubao_app_id = doubao_app_id_start.clone();
         let doubao_access_token = doubao_access_token_start.clone();
 
-        // 播放开始录音提示音
-        beep_player::play_start_beep();
-
         tauri::async_runtime::spawn(async move {
-            tracing::info!("检测到快捷键按下");
-            let _ = app.emit("recording_started", ());
-
-            // 显示录音悬浮窗并移动到屏幕底部居中
-            if let Some(overlay) = app.get_webview_window("overlay") {
-                // 获取主显示器信息并计算位置
-                if let Some(monitor) = overlay.primary_monitor().ok().flatten() {
-                    let screen_size = monitor.size();
-                    let scale_factor = monitor.scale_factor();
-                    let overlay_size = overlay.outer_size().unwrap_or(tauri::PhysicalSize::new(120, 44));
-
-                    // 计算底部居中位置（距底部 100px）
-                    let x = ((screen_size.width as f64 / scale_factor) / 2.0 - (overlay_size.width as f64 / scale_factor) / 2.0) as i32;
-                    let y = ((screen_size.height as f64 / scale_factor) - (overlay_size.height as f64 / scale_factor) - 100.0) as i32;
-
-                    let _ = overlay.set_position(tauri::PhysicalPosition::new(
-                        (x as f64 * scale_factor) as i32,
-                        (y as f64 * scale_factor) as i32
-                    ));
-                }
-                let _ = overlay.show();
-            }
-
-            if use_realtime {
-                // 实时模式：根据 provider 选择启动千问或豆包流式会话
-                let provider = realtime_provider.lock().unwrap().clone();
-
-                match provider {
-                    Some(config::AsrProvider::Doubao) => {
-                        tracing::info!("启动豆包实时流式转录...");
-
-                        // 1. 先启动流式录音（确保有音频数据，即使 WebSocket 连接失败也能用备用方案）
-                        let chunk_rx = {
-                            let mut streaming_guard = streaming_recorder.lock().unwrap();
-                            if let Some(ref mut rec) = *streaming_guard {
-                                match rec.start_streaming(Some(app.clone())) {
-                                    Ok(rx) => Some(rx),
-                                    Err(e) => {
-                                        emit_error_and_hide_overlay(&app, format!("录音失败: {}", e));
-                                        None
-                                    }
-                                }
-                            } else {
-                                emit_error_and_hide_overlay(&app, "流式录音器未初始化".to_string());
-                                None
-                            }
-                        };
-
-                        // 2. 然后建立豆包 WebSocket 连接
-                        if let Some(chunk_rx) = chunk_rx {
-                            if let (Some(app_id), Some(access_token)) = (doubao_app_id.as_ref(), doubao_access_token.as_ref()) {
-                                let realtime_client = DoubaoRealtimeClient::new(app_id.clone(), access_token.clone());
-                                match realtime_client.start_session().await {
-                                    Ok(session) => {
-                                        tracing::info!("豆包 WebSocket 连接已建立");
-
-                                        // 保存会话
-                                        *doubao_session.lock().await = Some(session);
-
-                                        // 3. 启动音频发送任务
-                                        let session_for_sender = Arc::clone(&doubao_session);
-                                        let sender_handle = tokio::spawn(async move {
-                                            tracing::info!("豆包音频发送任务启动");
-                                            let mut chunk_count = 0;
-
-                                            while let Ok(chunk) = chunk_rx.recv() {
-                                                let mut session_guard = session_for_sender.lock().await;
-                                                if let Some(ref mut session) = *session_guard {
-                                                    if let Err(e) = session.send_audio_chunk(&chunk).await {
-                                                        tracing::error!("发送音频块失败: {}", e);
-                                                        break;
-                                                    }
-                                                    chunk_count += 1;
-                                                    if chunk_count % 10 == 0 {
-                                                        tracing::debug!("已发送 {} 个音频块", chunk_count);
-                                                    }
-                                                } else {
-                                                    break;
-                                                }
-                                                drop(session_guard);
-                                            }
-
-                                            tracing::info!("豆包音频发送任务结束，共发送 {} 个块", chunk_count);
-                                        });
-
-                                        *audio_sender_handle.lock().unwrap() = Some(sender_handle);
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("建立豆包 WebSocket 连接失败: {}，录音已启动，将使用备用方案", e);
-                                        // 录音已在运行，备用方案可用，不需要再次启动录音
-                                    }
-                                }
-                            } else {
-                                tracing::error!("豆包凭证缺失：需要 app_id 和 access_token");
-                                // 凭证缺失，录音已启动但无法建立 WebSocket，备用方案会在 on_stop 时处理
-                                // 此处不需要隐藏悬浮窗，因为录音仍在进行
-                            }
-                        }
-                    }
-                    _ => {
-                        // 默认使用千问流式
-                        tracing::info!("启动千问实时流式转录...");
-
-                        // 1. 建立千问 WebSocket 连接
-                        let realtime_client = QwenRealtimeClient::new(api_key);
-                        match realtime_client.start_session().await {
-                            Ok(session) => {
-                                tracing::info!("千问 WebSocket 连接已建立");
-
-                                // 2. 启动流式录音
-                                let chunk_rx = {
-                                    let mut streaming_guard = streaming_recorder.lock().unwrap();
-                                    if let Some(ref mut rec) = *streaming_guard {
-                                        match rec.start_streaming(Some(app.clone())) {
-                                            Ok(rx) => Some(rx),
-                                            Err(e) => {
-                                                emit_error_and_hide_overlay(&app, format!("录音失败: {}", e));
-                                                None
-                                            }
-                                        }
-                                    } else {
-                                        emit_error_and_hide_overlay(&app, "流式录音器未初始化".to_string());
-                                        None
-                                    }
-                                };
-
-                                if let Some(chunk_rx) = chunk_rx {
-                                    // 保存会话
-                                    *active_session.lock().await = Some(session);
-
-                                    // 3. 启动音频发送任务
-                                    let session_for_sender = Arc::clone(&active_session);
-                                    let sender_handle = tokio::spawn(async move {
-                                        tracing::info!("千问音频发送任务启动");
-                                        let mut chunk_count = 0;
-
-                                        while let Ok(chunk) = chunk_rx.recv() {
-                                            let session_guard = session_for_sender.lock().await;
-                                            if let Some(ref session) = *session_guard {
-                                                if let Err(e) = session.send_audio_chunk(&chunk).await {
-                                                    tracing::error!("发送音频块失败: {}", e);
-                                                    break;
-                                                }
-                                                chunk_count += 1;
-                                                if chunk_count % 10 == 0 {
-                                                    tracing::debug!("已发送 {} 个音频块", chunk_count);
-                                                }
-                                            } else {
-                                                break;
-                                            }
-                                            drop(session_guard);
-                                        }
-
-                                        tracing::info!("千问音频发送任务结束，共发送 {} 个块", chunk_count);
-                                    });
-
-                                    *audio_sender_handle.lock().unwrap() = Some(sender_handle);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("建立千问 WebSocket 连接失败: {}，回退到普通录音", e);
-                                // 注意：这里不发送 error 事件，因为会尝试备用方案
-
-                                // 回退到普通流式录音（录完再传）
-                                let mut streaming_guard = streaming_recorder.lock().unwrap();
-                                if let Some(ref mut rec) = *streaming_guard {
-                                    if let Err(e) = rec.start_streaming(Some(app.clone())) {
-                                        // 备用方案也失败了，发送错误并隐藏悬浮窗
-                                        emit_error_and_hide_overlay(&app, format!("录音失败: {}", e));
-                                    }
-                                } else {
-                                    emit_error_and_hide_overlay(&app, "录音器未初始化".to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                // HTTP 模式：使用原有录音器
-                let mut recorder_guard = recorder.lock().unwrap();
-                if let Some(ref mut rec) = *recorder_guard {
-                    if let Err(e) = rec.start_recording(Some(app.clone())) {
-                        emit_error_and_hide_overlay(&app, format!("录音失败: {}", e));
-                    }
-                } else {
-                    emit_error_and_hide_overlay(&app, "录音器未初始化".to_string());
-                }
-            }
+            handle_recording_start(
+                app,
+                recorder,
+                streaming_recorder,
+                active_session,
+                doubao_session,
+                realtime_provider,
+                audio_sender_handle,
+                use_realtime,
+                api_key,
+                doubao_app_id,
+                doubao_access_token,
+            ).await;
         });
     };
 
@@ -507,6 +559,7 @@ async fn start_app(
         let doubao_client_state = Arc::clone(&doubao_client_stop);
         let doubao_session_state = Arc::clone(&doubao_session_stop);
         let realtime_provider_state = Arc::clone(&realtime_provider_stop);
+        let enable_fallback_state = Arc::clone(&enable_fallback_stop);
         let use_realtime = use_realtime_stop;
 
         // 播放停止录音提示音
@@ -530,6 +583,7 @@ async fn start_app(
                     qwen_client_state,
                     sensevoice_client_state,
                     doubao_client_state,
+                    enable_fallback_state,
                 ).await;
             } else {
                 // HTTP 模式：使用原有逻辑
@@ -541,18 +595,20 @@ async fn start_app(
                     qwen_client_state,
                     sensevoice_client_state,
                     doubao_client_state,
+                    enable_fallback_state,
                 ).await;
             }
         });
     };
 
     hotkey_service
-        .start(on_start, on_stop)
+        .activate(hotkey_cfg.clone(), on_start, on_stop)
         .map_err(|e| format!("启动快捷键监听失败: {}", e))?;
 
     *is_running = true;
     let mode_str = if use_realtime_mode { "实时模式" } else { "HTTP 模式" };
-    Ok(format!("应用已启动 ({})，按 Ctrl+Win 开始录音", mode_str))
+    let hotkey_display = hotkey_cfg.format_display();
+    Ok(format!("应用已启动 ({})，按 {} 开始录音", mode_str, hotkey_display))
 }
 
 /// HTTP 模式转录处理（原有逻辑）
@@ -564,6 +620,7 @@ async fn handle_http_transcription(
     qwen_client_state: Arc<Mutex<Option<QwenASRClient>>>,
     sensevoice_client_state: Arc<Mutex<Option<SenseVoiceClient>>>,
     doubao_client_state: Arc<Mutex<Option<DoubaoASRClient>>>,
+    enable_fallback_state: Arc<Mutex<bool>>,
 ) {
     // 停止录音并直接获取内存中的音频数据
     let audio_data = {
@@ -584,23 +641,53 @@ async fn handle_http_transcription(
     if let Some(audio_data) = audio_data {
         let _ = app.emit("transcribing", ());
 
-        let qwen_client = { qwen_client_state.lock().unwrap().clone() };
-        let sensevoice_client = { sensevoice_client_state.lock().unwrap().clone() };
-        let doubao_client = { doubao_client_state.lock().unwrap().clone() };
+        let enable_fallback = *enable_fallback_state.lock().unwrap();
+        let qwen = { qwen_client_state.lock().unwrap().clone() };
+        let doubao = { doubao_client_state.lock().unwrap().clone() };
+        let sensevoice = { sensevoice_client_state.lock().unwrap().clone() };
 
         let asr_start = std::time::Instant::now();
-        let result = if let Some(doubao) = doubao_client {
-            tracing::info!("使用豆包 ASR (HTTP)");
-            doubao.transcribe_bytes(&audio_data).await
-        } else if let Some(qwen) = qwen_client {
-            tracing::info!("使用千问 ASR (HTTP)");
-            qwen.transcribe_bytes(&audio_data).await
-        } else if let Some(sensevoice) = sensevoice_client {
-            tracing::info!("使用 SenseVoice ASR (HTTP)");
-            sensevoice.transcribe_bytes(&audio_data).await
+        let result = if enable_fallback {
+            match (qwen, doubao, sensevoice) {
+                (Some(q), _, Some(s)) => {
+                    tracing::info!("使用千问+SenseVoice并行竞速 (HTTP)");
+                    asr::transcribe_with_fallback_clients(q, s, audio_data.clone()).await
+                }
+                (_, Some(d), Some(s)) => {
+                    tracing::info!("使用豆包+SenseVoice并行竞速 (HTTP)");
+                    asr::transcribe_doubao_sensevoice_race(d, s, audio_data.clone()).await
+                }
+                (Some(q), _, _) => {
+                    tracing::info!("使用千问 ASR (HTTP, 无备用)");
+                    q.transcribe_bytes(&audio_data).await
+                }
+                (_, Some(d), _) => {
+                    tracing::info!("使用豆包 ASR (HTTP, 无备用)");
+                    d.transcribe_bytes(&audio_data).await
+                }
+                (_, _, Some(s)) => {
+                    tracing::info!("使用 SenseVoice ASR (HTTP, 无备用)");
+                    s.transcribe_bytes(&audio_data).await
+                }
+                _ => {
+                    tracing::error!("未找到可用的 ASR 客户端");
+                    Err(anyhow::anyhow!("ASR 客户端未初始化"))
+                }
+            }
         } else {
-            tracing::error!("未找到可用的 ASR 客户端");
-            Err(anyhow::anyhow!("ASR 客户端未初始化"))
+            if let Some(d) = doubao {
+                tracing::info!("使用豆包 ASR (HTTP)");
+                d.transcribe_bytes(&audio_data).await
+            } else if let Some(q) = qwen {
+                tracing::info!("使用千问 ASR (HTTP)");
+                q.transcribe_bytes(&audio_data).await
+            } else if let Some(s) = sensevoice {
+                tracing::info!("使用 SenseVoice ASR (HTTP)");
+                s.transcribe_bytes(&audio_data).await
+            } else {
+                tracing::error!("未找到可用的 ASR 客户端");
+                Err(anyhow::anyhow!("ASR 客户端未初始化"))
+            }
         };
         let asr_time_ms = asr_start.elapsed().as_millis() as u64;
 
@@ -621,9 +708,11 @@ async fn handle_realtime_stop(
     qwen_client_state: Arc<Mutex<Option<QwenASRClient>>>,
     sensevoice_client_state: Arc<Mutex<Option<SenseVoiceClient>>>,
     doubao_client_state: Arc<Mutex<Option<DoubaoASRClient>>>,
+    enable_fallback_state: Arc<Mutex<bool>>,
 ) {
     let _ = app.emit("transcribing", ());
     let asr_start = std::time::Instant::now();
+    let enable_fb = *enable_fallback_state.lock().unwrap();
 
     // 1. 停止流式录音，获取完整音频数据（用于备用方案）
     let audio_data = {
@@ -674,6 +763,7 @@ async fn handle_realtime_stop(
                             Arc::clone(&sensevoice_client_state),
                             Arc::clone(&doubao_client_state),
                             audio_data,
+                            enable_fb,
                         )
                         .await;
                     }
@@ -704,6 +794,7 @@ async fn handle_realtime_stop(
                                 Arc::clone(&sensevoice_client_state),
                                 Arc::clone(&doubao_client_state),
                                 audio_data,
+                                enable_fb,
                             )
                             .await;
                         } else {
@@ -725,6 +816,7 @@ async fn handle_realtime_stop(
                         Arc::clone(&sensevoice_client_state),
                         Arc::clone(&doubao_client_state),
                         audio_data,
+                        enable_fb,
                     )
                     .await;
                 } else {
@@ -752,6 +844,7 @@ async fn handle_realtime_stop(
                             Arc::clone(&sensevoice_client_state),
                             Arc::clone(&doubao_client_state),
                             audio_data,
+                            enable_fb,
                         )
                         .await;
                     }
@@ -784,6 +877,7 @@ async fn handle_realtime_stop(
                                 Arc::clone(&sensevoice_client_state),
                                 Arc::clone(&doubao_client_state),
                                 audio_data,
+                                enable_fb,
                             )
                             .await;
                         } else {
@@ -805,6 +899,7 @@ async fn handle_realtime_stop(
                         Arc::clone(&sensevoice_client_state),
                         Arc::clone(&doubao_client_state),
                         audio_data,
+                        enable_fb,
                     )
                     .await;
                 } else {
@@ -824,24 +919,54 @@ async fn fallback_transcription(
     sensevoice_client_state: Arc<Mutex<Option<SenseVoiceClient>>>,
     doubao_client_state: Arc<Mutex<Option<DoubaoASRClient>>>,
     audio_data: Vec<u8>,
+    enable_fallback: bool,
 ) {
-    let qwen_client = { qwen_client_state.lock().unwrap().clone() };
-    let sensevoice_client = { sensevoice_client_state.lock().unwrap().clone() };
-    let doubao_client = { doubao_client_state.lock().unwrap().clone() };
+    let qwen = { qwen_client_state.lock().unwrap().clone() };
+    let sensevoice = { sensevoice_client_state.lock().unwrap().clone() };
+    let doubao = { doubao_client_state.lock().unwrap().clone() };
 
     let asr_start = std::time::Instant::now();
-    let result = if let Some(doubao) = doubao_client {
-        tracing::info!("使用豆包 ASR 备用方案");
-        doubao.transcribe_bytes(&audio_data).await
-    } else if let Some(sensevoice) = sensevoice_client {
-        tracing::info!("使用 SenseVoice 备用方案");
-        sensevoice.transcribe_bytes(&audio_data).await
-    } else if let Some(qwen) = qwen_client {
-        tracing::info!("使用 HTTP 模式千问 ASR 备用");
-        qwen.transcribe_bytes(&audio_data).await
+    let result = if enable_fallback {
+        match (qwen, doubao, sensevoice) {
+            (Some(q), _, Some(s)) => {
+                tracing::info!("使用千问+SenseVoice并行竞速 (备用)");
+                asr::transcribe_with_fallback_clients(q, s, audio_data.clone()).await
+            }
+            (_, Some(d), Some(s)) => {
+                tracing::info!("使用豆包+SenseVoice并行竞速 (备用)");
+                asr::transcribe_doubao_sensevoice_race(d, s, audio_data.clone()).await
+            }
+            (Some(q), _, _) => {
+                tracing::info!("使用千问 HTTP 备用");
+                q.transcribe_bytes(&audio_data).await
+            }
+            (_, Some(d), _) => {
+                tracing::info!("使用豆包 HTTP 备用");
+                d.transcribe_bytes(&audio_data).await
+            }
+            (_, _, Some(s)) => {
+                tracing::info!("使用 SenseVoice 备用");
+                s.transcribe_bytes(&audio_data).await
+            }
+            _ => {
+                tracing::error!("未找到可用的 ASR 客户端");
+                Err(anyhow::anyhow!("ASR 客户端未初始化"))
+            }
+        }
     } else {
-        tracing::error!("未找到可用的 ASR 客户端以处理备用方案");
-        Err(anyhow::anyhow!("ASR 客户端未初始化"))
+        if let Some(d) = doubao {
+            tracing::info!("使用豆包 ASR 备用");
+            d.transcribe_bytes(&audio_data).await
+        } else if let Some(s) = sensevoice {
+            tracing::info!("使用 SenseVoice 备用");
+            s.transcribe_bytes(&audio_data).await
+        } else if let Some(q) = qwen {
+            tracing::info!("使用千问 HTTP 备用");
+            q.transcribe_bytes(&audio_data).await
+        } else {
+            tracing::error!("未找到可用的 ASR 客户端");
+            Err(anyhow::anyhow!("ASR 客户端未初始化"))
+        }
     };
     let asr_time_ms = asr_start.elapsed().as_millis() as u64;
 
@@ -906,6 +1031,7 @@ async fn handle_realtime_transcription(
                 sensevoice_client_state,
                 Arc::new(Mutex::new(None)), // 此函数未使用豆包
                 audio_data,
+                false, // 此函数未使用，默认禁用并行 fallback
             )
             .await;
         }
@@ -1082,9 +1208,30 @@ async fn stop_app(app_handle: AppHandle) -> Result<String, String> {
 
     let state = app_handle.state::<AppState>();
 
-    let mut is_running = state.is_running.lock().unwrap();
-    if !*is_running {
-        return Err("应用未在运行".to_string());
+    {
+        let is_running = state.is_running.lock().unwrap();
+        if !*is_running {
+            return Err("应用未在运行".to_string());
+        }
+    }
+
+    // 停用热键服务（不终止线程）
+    state.hotkey_service.deactivate();
+
+    // 显式关闭活跃的 WebSocket Session
+    {
+        let mut session_guard = state.active_session.lock().await;
+        if let Some(session) = session_guard.take() {
+            let _ = session.close().await;
+            tracing::info!("已关闭千问 WebSocket 会话");
+        }
+    }
+    {
+        let mut session_guard = state.doubao_session.lock().await;
+        if let Some(mut session) = session_guard.take() {
+            let _ = session.finish_audio().await;
+            tracing::info!("已关闭豆包 WebSocket 会话");
+        }
     }
 
     *state.audio_recorder.lock().unwrap() = None;
@@ -1094,7 +1241,7 @@ async fn stop_app(app_handle: AppHandle) -> Result<String, String> {
     *state.qwen_client.lock().unwrap() = None;
     *state.sensevoice_client.lock().unwrap() = None;
     *state.doubao_client.lock().unwrap() = None;
-    *is_running = false;
+    *state.is_running.lock().unwrap() = false;
 
     Ok("应用已停止".to_string())
 }
@@ -1114,6 +1261,7 @@ async fn quit_app(app_handle: AppHandle) -> Result<(), String> {
     {
         let mut is_running = state.is_running.lock().unwrap();
         if *is_running {
+            state.hotkey_service.deactivate();
             *state.audio_recorder.lock().unwrap() = None;
             *state.streaming_recorder.lock().unwrap() = None;
             *state.text_inserter.lock().unwrap() = None;
@@ -1268,6 +1416,7 @@ pub fn run() {
                 is_running: Arc::new(Mutex::new(false)),
                 use_realtime_asr: Arc::new(Mutex::new(true)),
                 enable_post_process: Arc::new(Mutex::new(false)),
+                enable_fallback: Arc::new(Mutex::new(false)),
                 qwen_client: Arc::new(Mutex::new(None)),
                 sensevoice_client: Arc::new(Mutex::new(None)),
                 doubao_client: Arc::new(Mutex::new(None)),
@@ -1275,6 +1424,7 @@ pub fn run() {
                 doubao_session: Arc::new(tokio::sync::Mutex::new(None)),
                 realtime_provider: Arc::new(Mutex::new(None)),
                 audio_sender_handle: Arc::new(Mutex::new(None)),
+                hotkey_service: Arc::new(HotkeyService::new()),
             };
             app.manage(app_state);
 

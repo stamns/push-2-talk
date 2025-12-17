@@ -9,4 +9,5 @@ pub use race_strategy::{
     transcribe_with_fallback,
     transcribe_with_fallback_bytes,
     transcribe_with_fallback_clients,
+    transcribe_doubao_sensevoice_race,
 };
