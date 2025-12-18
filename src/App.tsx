@@ -207,10 +207,45 @@ const ASR_PROVIDERS: Record<AsrProvider, { name: string; model: string; docsUrl:
 function App() {
   const [apiKey, setApiKey] = useState("");
   const [fallbackApiKey, setFallbackApiKey] = useState("");
-  const [asrConfig, setAsrConfig] = useState<AsrConfig>({
-    primary: { provider: 'qwen', api_key: '' },
-    fallback: null,
-    enable_fallback: false,
+
+  // Cache for different ASR providers to prevent data loss when switching
+  const CACHE_STORAGE_KEY = 'pushtotalk_asr_cache';
+  const [asrCache, setAsrCache] = useState<{
+    active_provider: AsrProvider;
+    qwen: { api_key: string };
+    doubao: { app_id: string; access_token: string };
+    siliconflow: { api_key: string };
+  }>(() => {
+    // Initialize from localStorage to persist across sessions
+    try {
+      const saved = localStorage.getItem(CACHE_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          active_provider: parsed.active_provider || 'qwen',
+          ...parsed
+        };
+      }
+    } catch (e) {
+      console.error("Failed to load ASR cache:", e);
+    }
+    return {
+      active_provider: 'qwen',
+      qwen: { api_key: '' },
+      doubao: { app_id: '', access_token: '' },
+      siliconflow: { api_key: '' }
+    };
+  });
+
+  const [asrConfig, setAsrConfig] = useState<AsrConfig>(() => {
+    const provider = asrCache.active_provider;
+    return {
+      primary: provider === 'qwen'
+        ? { provider: 'qwen', api_key: asrCache.qwen.api_key }
+        : { provider: 'doubao', api_key: '', app_id: asrCache.doubao.app_id, access_token: asrCache.doubao.access_token },
+      fallback: null,
+      enable_fallback: false,
+    };
   });
   const [showAsrModal, setShowAsrModal] = useState(false);
   const [useRealtime, setUseRealtime] = useState(true);
@@ -248,6 +283,11 @@ function App() {
 
   // 获取当前选中的预设对象
   const activePreset = llmConfig.presets.find(p => p.id === llmConfig.active_preset_id) || llmConfig.presets[0];
+
+  // Auto-save asrCache to localStorage whenever it changes
+  useEffect(() => {
+    localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(asrCache));
+  }, [asrCache]);
 
   useEffect(() => {
     if (transcriptEndRef.current) {
@@ -368,9 +408,44 @@ function App() {
       setApiKey(config.dashscope_api_key);
       setFallbackApiKey(config.siliconflow_api_key || "");
 
-      // 加载 ASR 配置
+      // 智能填充缓存：更新后端读到的 Key 到对应的缓存槽位
       if (config.asr_config) {
-        setAsrConfig(config.asr_config);
+        const backendPrimary = config.asr_config.primary;
+
+        setAsrCache(prev => {
+          const newCache = { ...prev };
+          // 更新千问缓存
+          if (backendPrimary.provider === 'qwen') {
+            newCache.qwen.api_key = backendPrimary.api_key;
+          } else if (config.dashscope_api_key) {
+            newCache.qwen.api_key = config.dashscope_api_key;
+          }
+          // 更新豆包缓存
+          if (backendPrimary.provider === 'doubao') {
+            newCache.doubao.app_id = backendPrimary.app_id || '';
+            newCache.doubao.access_token = backendPrimary.access_token || '';
+          }
+          // 更新硅基缓存
+          if (config.asr_config.fallback?.provider === 'siliconflow') {
+            newCache.siliconflow.api_key = config.asr_config.fallback.api_key;
+          } else if (config.siliconflow_api_key) {
+            newCache.siliconflow.api_key = config.siliconflow_api_key;
+          }
+          return newCache;
+        });
+
+        // 使用缓存中的 active_provider，而不是后端返回的
+        const preferredProvider = asrCache.active_provider;
+
+        setAsrConfig({
+          ...config.asr_config,
+          primary: {
+            provider: preferredProvider,
+            api_key: preferredProvider === 'qwen' ? (config.dashscope_api_key || asrCache.qwen.api_key) : '',
+            app_id: preferredProvider === 'doubao' ? asrCache.doubao.app_id : undefined,
+            access_token: preferredProvider === 'doubao' ? asrCache.doubao.access_token : undefined,
+          }
+        });
       }
 
       setUseRealtime(config.use_realtime_asr ?? true);
@@ -411,7 +486,7 @@ function App() {
         ? config.hotkey_config
         : { keys: ['control_left', 'meta_left'] as HotkeyKey[] };
 
-      if (config.dashscope_api_key && config.dashscope_api_key.trim() !== "") {
+      if (loadedAsrConfig && isAsrConfigValid(loadedAsrConfig.primary)) {
         autoStartApp(config.dashscope_api_key, config.siliconflow_api_key || "", config.use_realtime_asr ?? true, config.enable_llm_post_process ?? false, loadedLlmConfig, loadedAsrConfig, loadedHotkeyConfig);
       }
     } catch (err) {
@@ -649,10 +724,19 @@ function App() {
     }
   };
 
+  const isAsrConfigValid = (config: AsrProviderConfig): boolean => {
+    if (config.provider === 'qwen' || config.provider === 'siliconflow') {
+      return config.api_key.trim() !== '';
+    } else if (config.provider === 'doubao') {
+      return (config.app_id?.trim() || '') !== '' && (config.access_token?.trim() || '') !== '';
+    }
+    return false;
+  };
+
   const handleStartStop = async () => {
     try {
       if (status === "idle") {
-        if (!apiKey && !asrConfig.primary.api_key) {
+        if (!isAsrConfigValid(asrConfig.primary)) {
           setError("请先配置 ASR API Key");
           return;
         }
@@ -1027,7 +1111,7 @@ function App() {
               </button>
             </div>
 
-            {!asrConfig.primary.api_key && (
+            {!isAsrConfigValid(asrConfig.primary) && (
               <div className="flex items-center gap-2 p-3 bg-amber-50 border border-amber-100 rounded-xl text-amber-600 text-xs animate-in slide-in-from-top-2 fade-in duration-300">
                 <AlertCircle size={14} />
                 <span>请点击设置按钮配置 ASR API Key</span>
@@ -1194,10 +1278,21 @@ function App() {
                     <label className="text-xs font-medium text-slate-600">服务商</label>
                     <select
                       value={asrConfig.primary.provider}
-                      onChange={(e) => setAsrConfig(prev => ({
-                        ...prev,
-                        primary: { ...prev.primary, provider: e.target.value as AsrProvider }
-                      }))}
+                      onChange={(e) => {
+                        const newProvider = e.target.value as AsrProvider;
+                        // 从缓存恢复对应 provider 的配置
+                        setAsrConfig(prev => ({
+                          ...prev,
+                          primary: newProvider === 'qwen'
+                            ? { provider: 'qwen', api_key: asrCache.qwen.api_key }
+                            : { provider: 'doubao', api_key: '', app_id: asrCache.doubao.app_id, access_token: asrCache.doubao.access_token }
+                        }));
+                        // 记住这次的选择
+                        setAsrCache(prev => ({
+                          ...prev,
+                          active_provider: newProvider
+                        }));
+                      }}
                       className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
                     >
                       <option value="qwen">{ASR_PROVIDERS.qwen.name}</option>
@@ -1212,10 +1307,14 @@ function App() {
                         <input
                           type={showApiKey ? "text" : "password"}
                           value={asrConfig.primary.api_key}
-                          onChange={(e) => setAsrConfig(prev => ({
-                            ...prev,
-                            primary: { ...prev.primary, api_key: e.target.value }
-                          }))}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            setAsrConfig(prev => ({
+                              ...prev,
+                              primary: { ...prev.primary, api_key: value }
+                            }));
+                            setAsrCache(prev => ({ ...prev, qwen: { api_key: value } }));
+                          }}
                           className="w-full px-3 py-2 pr-10 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
                           placeholder="sk-..."
                         />
@@ -1234,10 +1333,14 @@ function App() {
                         <input
                           type="text"
                           value={asrConfig.primary.app_id || ''}
-                          onChange={(e) => setAsrConfig(prev => ({
-                            ...prev,
-                            primary: { ...prev.primary, app_id: e.target.value }
-                          }))}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            setAsrConfig(prev => ({
+                              ...prev,
+                              primary: { ...prev.primary, app_id: value }
+                            }));
+                            setAsrCache(prev => ({ ...prev, doubao: { ...prev.doubao, app_id: value } }));
+                          }}
                           className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
                           placeholder="输入豆包 APP ID"
                         />
@@ -1248,10 +1351,14 @@ function App() {
                           <input
                             type={showApiKey ? "text" : "password"}
                             value={asrConfig.primary.access_token || ''}
-                            onChange={(e) => setAsrConfig(prev => ({
-                              ...prev,
-                              primary: { ...prev.primary, access_token: e.target.value }
-                            }))}
+                            onChange={(e) => {
+                              const value = e.target.value;
+                              setAsrConfig(prev => ({
+                                ...prev,
+                                primary: { ...prev.primary, access_token: value }
+                              }));
+                              setAsrCache(prev => ({ ...prev, doubao: { ...prev.doubao, access_token: value } }));
+                            }}
                             className="w-full px-3 py-2 pr-10 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
                             placeholder="输入 Access Token"
                           />
@@ -1277,7 +1384,16 @@ function App() {
                 <div className="flex items-center justify-between">
                   <h4 className="text-sm font-bold text-slate-700">备用模型（可选）</h4>
                   <button
-                    onClick={() => setAsrConfig(prev => ({ ...prev, enable_fallback: !prev.enable_fallback }))}
+                    onClick={() => setAsrConfig(prev => {
+                      const isEnabling = !prev.enable_fallback;
+                      return {
+                        ...prev,
+                        enable_fallback: isEnabling,
+                        fallback: isEnabling && (!prev.fallback?.api_key)
+                          ? { provider: 'siliconflow', api_key: asrCache.siliconflow.api_key }
+                          : prev.fallback
+                      };
+                    })}
                     className={`relative w-11 h-6 rounded-full transition-all duration-300 ${
                       asrConfig.enable_fallback ? 'bg-blue-500' : 'bg-slate-300'
                     }`}
@@ -1313,13 +1429,20 @@ function App() {
                         <input
                           type={showApiKey ? "text" : "password"}
                           value={asrConfig.fallback?.api_key || ''}
-                          onChange={(e) => setAsrConfig(prev => ({
-                            ...prev,
-                            fallback: {
-                              provider: prev.fallback?.provider || 'siliconflow',
-                              api_key: e.target.value
-                            }
-                          }))}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setAsrConfig(prev => ({
+                              ...prev,
+                              fallback: {
+                                provider: prev.fallback?.provider || 'siliconflow',
+                                api_key: val
+                              }
+                            }));
+                            setAsrCache(prev => ({
+                              ...prev,
+                              siliconflow: { api_key: val }
+                            }));
+                          }}
                           className="w-full px-3 py-2 pr-10 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
                           placeholder="sk-..."
                         />
