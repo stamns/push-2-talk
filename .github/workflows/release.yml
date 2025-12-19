@@ -172,7 +172,7 @@ jobs:
             ${{ steps.changelog.outputs.changelog }}
 
             ## 下载安装
-            - **Windows**: 下载 `.msi` 或 `.exe` 安装包
+            - **Windows**: 下载 `.exe` 安装包
             - 安装后需以管理员身份运行
             - 应用内支持自动更新
 
