@@ -8,6 +8,96 @@ use std::collections::HashSet;
 use anyhow::Result;
 use crate::config::{HotkeyConfig, HotkeyKey, TriggerMode, DualHotkeyConfig};
 
+// ================== Windows 物理按键状态检测 ==================
+// 用于解决 rdev 可能漏掉 KeyRelease 事件的问题（Ghost Key）
+
+#[cfg(target_os = "windows")]
+#[link(name = "user32")]
+extern "system" {
+    fn GetAsyncKeyState(vKey: i32) -> i16;
+}
+
+/// 检查特定按键的物理状态是否真的被按下
+/// 使用 Windows GetAsyncKeyState API 直接查询硬件状态
+#[cfg(target_os = "windows")]
+fn is_key_physically_down(key: &HotkeyKey) -> bool {
+    let vk_code = match key {
+        // --- 修饰键 ---
+        HotkeyKey::ControlLeft => 0xA2,  // VK_LCONTROL
+        HotkeyKey::ControlRight => 0xA3, // VK_RCONTROL
+        HotkeyKey::ShiftLeft => 0xA0,    // VK_LSHIFT
+        HotkeyKey::ShiftRight => 0xA1,   // VK_RSHIFT
+        HotkeyKey::AltLeft => 0xA4,      // VK_LMENU
+        HotkeyKey::AltRight => 0xA5,     // VK_RMENU
+        HotkeyKey::MetaLeft => 0x5B,     // VK_LWIN
+        HotkeyKey::MetaRight => 0x5C,    // VK_RWIN
+
+        // --- 字母键 (A-Z) ---
+        // Windows VK Code 对于字母键直接对应大写 ASCII 码
+        HotkeyKey::KeyA => 0x41, HotkeyKey::KeyB => 0x42, HotkeyKey::KeyC => 0x43,
+        HotkeyKey::KeyD => 0x44, HotkeyKey::KeyE => 0x45, HotkeyKey::KeyF => 0x46,
+        HotkeyKey::KeyG => 0x47, HotkeyKey::KeyH => 0x48, HotkeyKey::KeyI => 0x49,
+        HotkeyKey::KeyJ => 0x4A, HotkeyKey::KeyK => 0x4B, HotkeyKey::KeyL => 0x4C,
+        HotkeyKey::KeyM => 0x4D, HotkeyKey::KeyN => 0x4E, HotkeyKey::KeyO => 0x4F,
+        HotkeyKey::KeyP => 0x50, HotkeyKey::KeyQ => 0x51, HotkeyKey::KeyR => 0x52,
+        HotkeyKey::KeyS => 0x53, HotkeyKey::KeyT => 0x54, HotkeyKey::KeyU => 0x55,
+        HotkeyKey::KeyV => 0x56, HotkeyKey::KeyW => 0x57, HotkeyKey::KeyX => 0x58,
+        HotkeyKey::KeyY => 0x59, HotkeyKey::KeyZ => 0x5A,
+
+        // --- 数字键 (Top Row) ---
+        HotkeyKey::Num0 => 0x30, HotkeyKey::Num1 => 0x31, HotkeyKey::Num2 => 0x32,
+        HotkeyKey::Num3 => 0x33, HotkeyKey::Num4 => 0x34, HotkeyKey::Num5 => 0x35,
+        HotkeyKey::Num6 => 0x36, HotkeyKey::Num7 => 0x37, HotkeyKey::Num8 => 0x38,
+        HotkeyKey::Num9 => 0x39,
+
+        // --- 功能键 ---
+        HotkeyKey::F1 => 0x70, HotkeyKey::F2 => 0x71, HotkeyKey::F3 => 0x72,
+        HotkeyKey::F4 => 0x73, HotkeyKey::F5 => 0x74, HotkeyKey::F6 => 0x75,
+        HotkeyKey::F7 => 0x76, HotkeyKey::F8 => 0x77, HotkeyKey::F9 => 0x78,
+        HotkeyKey::F10 => 0x79, HotkeyKey::F11 => 0x7A, HotkeyKey::F12 => 0x7B,
+
+        // --- 常用功能键 ---
+        HotkeyKey::Space => 0x20,
+        HotkeyKey::Tab => 0x09,
+        HotkeyKey::Escape => 0x1B,
+        HotkeyKey::Return => 0x0D,
+        HotkeyKey::Backspace => 0x08,
+        HotkeyKey::Delete => 0x2E,
+        HotkeyKey::Insert => 0x2D,
+
+        // --- 方向键 ---
+        HotkeyKey::Up => 0x26,
+        HotkeyKey::Down => 0x28,
+        HotkeyKey::Left => 0x25,
+        HotkeyKey::Right => 0x27,
+
+        // --- 导航键 ---
+        HotkeyKey::Home => 0x24,
+        HotkeyKey::End => 0x23,
+        HotkeyKey::PageUp => 0x21,
+        HotkeyKey::PageDown => 0x22,
+
+        // --- 大写锁定 ---
+        HotkeyKey::CapsLock => 0x14,
+    };
+
+    unsafe {
+        // GetAsyncKeyState 返回值的最高位（0x8000）表示按键当前是否按下
+        (GetAsyncKeyState(vk_code) as u16 & 0x8000) != 0
+    }
+}
+
+/// 非 Windows 系统默认返回 true（不做额外检查）
+#[cfg(not(target_os = "windows"))]
+fn is_key_physically_down(_key: &HotkeyKey) -> bool {
+    true
+}
+
+/// 检查一组按键是否全部物理按下
+fn are_keys_physically_down(keys: &[HotkeyKey]) -> bool {
+    keys.iter().all(|k| is_key_physically_down(k))
+}
+
 // 看门狗检查间隔（毫秒）
 const WATCHDOG_INTERVAL_MS: u64 = 100;
 // 按键释放后的稳定时间（毫秒）
@@ -21,10 +111,14 @@ struct HotkeyState {
     watchdog_running: bool,
     /// 当前触发的模式（如果正在录音）
     current_trigger_mode: Option<TriggerMode>,
+    /// 是否通过松手模式快捷键启动（直接进入锁定状态）
+    is_release_mode_triggered: bool,
 }
 
-/// 回调函数类型（接收触发模式参数）
-type Callback = Arc<dyn Fn(TriggerMode) + Send + Sync>;
+/// 回调函数类型（接收触发模式参数和是否为松手模式）
+/// 第一个参数：TriggerMode - 听写或AI助手
+/// 第二个参数：bool - 是否为松手模式（true=松手模式，false=普通模式）
+type Callback = Arc<dyn Fn(TriggerMode, bool) + Send + Sync>;
 
 /// 单例热键服务（支持双模式）
 pub struct HotkeyService {
@@ -51,6 +145,8 @@ impl HotkeyService {
             assistant_config: Arc::new(RwLock::new(HotkeyConfig {
                 keys: vec![HotkeyKey::AltLeft, HotkeyKey::Space],
                 mode: crate::config::HotkeyMode::Press,
+                enable_release_lock: false,
+                release_mode_keys: None,  // AI助手模式不支持松手模式
             })),
             state: Arc::new(Mutex::new(HotkeyState::default())),
             listener_started: Arc::new(AtomicBool::new(false)),
@@ -202,38 +298,68 @@ impl HotkeyService {
                                     );
                                 }
 
-                                // 严格匹配：检查是否匹配两个配置中的任意一个
-                                let (matches_dictation, matches_assistant) = {
+                                // 严格匹配：检查是否匹配三种快捷键配置
+                                let (matches_dictation, matches_assistant, matches_release_mode) = {
+                                    // 听写模式快捷键
                                     let contains_dictation = dictation_cfg.keys.iter().all(|k| s.pressed_keys.contains(k));
                                     let count_dictation = s.pressed_keys.len() == dictation_cfg.keys.len();
 
+                                    // AI助手模式快捷键
                                     let contains_assistant = assistant_cfg.keys.iter().all(|k| s.pressed_keys.contains(k));
                                     let count_assistant = s.pressed_keys.len() == assistant_cfg.keys.len();
 
-                                    (contains_dictation && count_dictation, contains_assistant && count_assistant)
+                                    // 松手模式快捷键（仅听写模式支持）
+                                    let matches_release = if let Some(ref release_keys) = dictation_cfg.release_mode_keys {
+                                        let contains_release = release_keys.iter().all(|k| s.pressed_keys.contains(k));
+                                        let count_release = s.pressed_keys.len() == release_keys.len();
+                                        contains_release && count_release
+                                    } else {
+                                        false
+                                    };
+
+                                    (contains_dictation && count_dictation, contains_assistant && count_assistant, matches_release)
                                 };
 
+                                // === 松手模式：检查是否需要取消录音（再次按下相同快捷键） ===
+                                if s.is_recording && s.is_release_mode_triggered && matches_release_mode {
+                                    tracing::info!("松手模式下再次按下快捷键，取消录音");
+                                    s.is_recording = false;
+                                    s.watchdog_running = false;
+                                    s.current_trigger_mode = None;
+                                    s.is_release_mode_triggered = false;
+                                    drop(s);
+                                    // 调用 on_stop 回调（传递 true 表示是松手模式取消）
+                                    if let Some(cb) = on_stop_inner.read().unwrap().as_ref() {
+                                        cb(TriggerMode::Dictation, true);  // 松手模式取消
+                                    }
+                                    return;
+                                }
+
                                 if !s.is_recording {
-                                    // 确定触发模式（听写优先）
-                                    let trigger_mode = if matches_dictation {
-                                        Some(TriggerMode::Dictation)
+                                    // 确定触发模式（优先级：松手模式 > 普通听写 > AI助手）
+                                    let (trigger_mode, is_release_mode) = if matches_release_mode {
+                                        (Some(TriggerMode::Dictation), true)
+                                    } else if matches_dictation {
+                                        (Some(TriggerMode::Dictation), false)
                                     } else if matches_assistant {
-                                        Some(TriggerMode::AiAssistant)
+                                        (Some(TriggerMode::AiAssistant), false)
                                     } else {
-                                        None
+                                        (None, false)
                                     };
 
                                     if let Some(mode) = trigger_mode {
                                         s.is_recording = true;
                                         s.current_trigger_mode = Some(mode);
+                                        s.is_release_mode_triggered = is_release_mode;
                                         let mode_name = mode.display_name();
-                                        tracing::info!("检测到快捷键按下: {}，开始录音", mode_name);
+                                        let mode_desc = if is_release_mode { "松手模式" } else { "普通模式" };
+                                        tracing::info!("检测到快捷键按下: {} ({})", mode_name, mode_desc);
 
                                         // 启动看门狗
                                         if s.watchdog_running {
                                             drop(s);
                                             if let Some(cb) = on_start_inner.read().unwrap().as_ref() {
-                                                cb(mode);
+                                                cb(mode, is_release_mode);  // 传递松手模式标志
                                             }
                                             return;
                                         }
@@ -273,32 +399,65 @@ impl HotkeyService {
                                                 }
 
                                                 // 根据当前触发模式检查对应的按键
-                                                let all_pressed = match s.current_trigger_mode {
+                                                // 双重检查：软件状态 + 硬件物理状态
+                                                // 这样即使 rdev 漏掉了 KeyRelease 事件，也能通过硬件状态检测到
+                                                let (all_pressed, target_keys) = match s.current_trigger_mode {
                                                     Some(TriggerMode::Dictation) => {
                                                         let cfg = dictation_cfg_wd.read().unwrap();
-                                                        cfg.keys.iter().all(|k| s.pressed_keys.contains(k))
+                                                        let soft_pressed = cfg.keys.iter().all(|k| s.pressed_keys.contains(k));
+                                                        (soft_pressed, cfg.keys.clone())
                                                     }
                                                     Some(TriggerMode::AiAssistant) => {
                                                         let cfg = assistant_cfg_wd.read().unwrap();
-                                                        cfg.keys.iter().all(|k| s.pressed_keys.contains(k))
+                                                        let soft_pressed = cfg.keys.iter().all(|k| s.pressed_keys.contains(k));
+                                                        (soft_pressed, cfg.keys.clone())
                                                     }
-                                                    None => false,
+                                                    None => (false, vec![]),
                                                 };
                                                 drop(s);
 
-                                                if !all_pressed {
+                                                // 硬件状态检查：使用 GetAsyncKeyState 直接查询物理按键状态
+                                                // 只要有一个键物理上松开了，就认为用户已松手
+                                                let hardware_pressed = if !target_keys.is_empty() {
+                                                    are_keys_physically_down(&target_keys)
+                                                } else {
+                                                    false
+                                                };
+
+                                                // 最终判断：软件状态和硬件状态都要按下才算真正按着
+                                                let truly_pressed = all_pressed && hardware_pressed;
+
+                                                if !truly_pressed {
                                                     release_detected_count += 1;
                                                     if release_detected_count >= required_count {
                                                         let mut s = state_wd.lock().unwrap();
                                                         if s.is_recording {
+                                                            // 检查是否为松手模式
+                                                            if s.is_release_mode_triggered {
+                                                                // 松手模式下，检测到按键释放后清理软件状态，但录音继续
+                                                                s.pressed_keys.clear();
+                                                                tracing::info!("看门狗检测到松手模式快捷键释放（硬件状态同步），录音继续");
+                                                                drop(s);
+                                                                break;  // 退出看门狗，但不停止录音
+                                                            }
+
                                                             let mode = s.current_trigger_mode.unwrap_or(TriggerMode::Dictation);
                                                             s.is_recording = false;
                                                             s.watchdog_running = false;
                                                             s.current_trigger_mode = None;
+                                                            s.is_release_mode_triggered = false;
+                                                            // 清理可能卡住的按键状态
+                                                            s.pressed_keys.clear();
                                                             drop(s);
-                                                            tracing::warn!("看门狗检测到按键释放事件丢失，强制停止录音");
+
+                                                            // 区分是软件检测还是硬件检测
+                                                            if !all_pressed {
+                                                                tracing::warn!("看门狗检测到按键释放（软件状态），强制停止录音");
+                                                            } else {
+                                                                tracing::warn!("看门狗检测到按键释放（硬件状态同步），强制停止录音");
+                                                            }
                                                             if let Some(cb) = on_stop_wd.read().unwrap().as_ref() {
-                                                                cb(mode);
+                                                                cb(mode, false);  // 传递 false（非松手模式）
                                                             }
                                                         }
                                                         break;
@@ -313,7 +472,7 @@ impl HotkeyService {
                                         });
 
                                         if let Some(cb) = on_start_inner.read().unwrap().as_ref() {
-                                            cb(mode);
+                                            cb(mode, is_release_mode);  // 传递松手模式标志
                                         }
                                     }
                                 }
@@ -359,15 +518,22 @@ impl HotkeyService {
                                 };
 
                                 if !all_pressed {
+                                    // === 松手模式：检查是否为松手模式快捷键触发 ===
+                                    if s.is_release_mode_triggered {
+                                        tracing::info!("松手模式快捷键释放，录音继续（锁定状态）");
+                                        return;  // 不停止录音，等待用户点击悬浮窗按钮
+                                    }
+
                                     let mode = s.current_trigger_mode.unwrap_or(TriggerMode::Dictation);
                                     s.is_recording = false;
                                     s.watchdog_running = false;
                                     s.current_trigger_mode = None;
+                                    s.is_release_mode_triggered = false;  // 重置标志
                                     drop(s);
 
                                     tracing::info!("检测到快捷键释放，停止录音");
                                     if let Some(cb) = on_stop_inner.read().unwrap().as_ref() {
-                                        cb(mode);
+                                        cb(mode, false);  // 释放时不是松手模式
                                     }
                                 }
                             }
@@ -407,7 +573,7 @@ impl HotkeyService {
     /// # Arguments
     /// * `config` - 双快捷键配置（听写模式 + AI助手模式）
     /// * `on_start` - 开始录音回调（接收 TriggerMode 参数）
-    /// * `on_stop` - 停止录音回调（接收 TriggerMode 参数）
+    /// * `on_stop` - 停止录音回调（接收 TriggerMode 和 is_release_mode 参数）
     pub fn activate_dual<F1, F2>(
         &self,
         config: DualHotkeyConfig,
@@ -415,8 +581,8 @@ impl HotkeyService {
         on_stop: F2,
     ) -> Result<()>
     where
-        F1: Fn(TriggerMode) + Send + Sync + 'static,
-        F2: Fn(TriggerMode) + Send + Sync + 'static,
+        F1: Fn(TriggerMode, bool) + Send + Sync + 'static,
+        F2: Fn(TriggerMode, bool) + Send + Sync + 'static,
     {
         // 验证配置
         config.validate()?;
@@ -472,14 +638,16 @@ impl HotkeyService {
             assistant: HotkeyConfig {
                 keys: vec![HotkeyKey::AltLeft, HotkeyKey::Space],
                 mode: crate::config::HotkeyMode::Press,
+                enable_release_lock: false,
+                release_mode_keys: None,
             },
         };
 
-        // 包装回调来忽略 TriggerMode 参数
-        let on_start_wrapped = move |_mode: TriggerMode| {
+        // 包装回调来忽略 TriggerMode 和 is_release_mode 参数
+        let on_start_wrapped = move |_mode: TriggerMode, _is_release: bool| {
             on_start();
         };
-        let on_stop_wrapped = move |_mode: TriggerMode| {
+        let on_stop_wrapped = move |_mode: TriggerMode, _is_release: bool| {
             on_stop();
         };
 

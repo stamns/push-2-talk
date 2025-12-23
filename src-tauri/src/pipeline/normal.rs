@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use std::time::Instant;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::llm_post_processor::LlmPostProcessor;
 use crate::text_inserter::TextInserter;
@@ -58,10 +58,14 @@ impl NormalPipeline {
         // 2. 可选 LLM 后处理
         let (final_text, original_text, llm_time_ms) = Self::maybe_polish(app, post_processor, &text).await;
 
-        // 3. 插入文本
+        // 3. 插入前隐藏窗口，让焦点恢复到目标应用
+        // 这样用户能看到完整的处理动画，只在最后插入文本前才隐藏窗口
+        Self::hide_overlay_and_wait(app).await;
+
+        // 4. 插入文本
         let inserted = Self::insert_text(text_inserter, &final_text);
 
-        // 4. 返回结果
+        // 5. 返回结果
         Ok(PipelineResult::success(
             final_text,
             original_text,
@@ -124,6 +128,21 @@ impl NormalPipeline {
         } else {
             tracing::warn!("NormalPipeline: TextInserter 未初始化");
             false
+        }
+    }
+
+    /// 隐藏悬浮窗并等待焦点恢复
+    ///
+    /// 在插入文本前调用，确保焦点从悬浮窗切回目标应用
+    /// 只有当窗口可见时才执行隐藏操作
+    async fn hide_overlay_and_wait(app: &AppHandle) {
+        if let Some(overlay) = app.get_webview_window("overlay") {
+            if overlay.is_visible().unwrap_or(false) {
+                tracing::info!("NormalPipeline: 隐藏悬浮窗并等待焦点恢复...");
+                let _ = overlay.hide();
+                // 给操作系统时间把焦点切回上一个活动窗口
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
         }
     }
 }

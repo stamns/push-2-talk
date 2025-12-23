@@ -213,6 +213,15 @@ pub struct HotkeyConfig {
     /// 热键触发模式（默认为按住模式）
     #[serde(default)]
     pub mode: HotkeyMode,
+    /// 松手模式开关（仅听写模式生效）
+    /// 已弃用：现在通过 release_mode_keys 独立配置
+    #[serde(default)]
+    pub enable_release_lock: bool,
+    /// 松手模式独立快捷键（可选）
+    /// 如果设置，则按此快捷键直接启动松手模式，无需长按
+    /// 默认为 F2（仅听写模式）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_mode_keys: Option<Vec<HotkeyKey>>,
 }
 
 impl Default for HotkeyConfig {
@@ -221,6 +230,8 @@ impl Default for HotkeyConfig {
         Self {
             keys: vec![HotkeyKey::ControlLeft, HotkeyKey::MetaLeft],
             mode: HotkeyMode::default(),
+            enable_release_lock: false,
+            release_mode_keys: None,  // 默认无松手模式快捷键
         }
     }
 }
@@ -246,6 +257,8 @@ fn default_dictation_hotkey() -> HotkeyConfig {
     HotkeyConfig {
         keys: vec![HotkeyKey::ControlLeft, HotkeyKey::MetaLeft],
         mode: HotkeyMode::Press,
+        enable_release_lock: false,
+        release_mode_keys: Some(vec![HotkeyKey::F2]),  // 默认 F2 为松手模式快捷键
     }
 }
 
@@ -253,6 +266,8 @@ fn default_assistant_hotkey() -> HotkeyConfig {
     HotkeyConfig {
         keys: vec![HotkeyKey::AltLeft, HotkeyKey::Space],
         mode: HotkeyMode::Press,
+        enable_release_lock: false,
+        release_mode_keys: None,  // AI助手模式不支持松手模式
     }
 }
 
@@ -328,6 +343,36 @@ impl HotkeyConfig {
         let unique_keys: HashSet<_> = self.keys.iter().collect();
         if unique_keys.len() != self.keys.len() {
             anyhow::bail!("热键配置中存在重复的按键");
+        }
+
+        // 验证松手模式快捷键（如果设置）
+        if let Some(ref release_keys) = self.release_mode_keys {
+            if release_keys.is_empty() {
+                anyhow::bail!("松手模式快捷键配置不能为空");
+            }
+
+            let release_has_function = release_keys.iter().any(|k| k.is_function_key());
+            let release_has_modifier = release_keys.iter().any(|k| k.is_modifier());
+            if !release_has_modifier && !release_has_function {
+                anyhow::bail!("松手模式快捷键必须包含至少一个修饰键或功能键");
+            }
+
+            if release_keys.len() > 4 {
+                anyhow::bail!("松手模式快捷键最多支持4个按键组合");
+            }
+
+            // 检查松手模式快捷键是否有重复按键
+            let release_unique: HashSet<_> = release_keys.iter().collect();
+            if release_unique.len() != release_keys.len() {
+                anyhow::bail!("松手模式快捷键配置中存在重复的按键");
+            }
+
+            // 检查与主快捷键不冲突
+            let main_set: HashSet<_> = self.keys.iter().collect();
+            let release_set: HashSet<_> = release_keys.iter().collect();
+            if main_set == release_set {
+                anyhow::bail!("松手模式快捷键不能与主快捷键相同");
+            }
         }
 
         Ok(())

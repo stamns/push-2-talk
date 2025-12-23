@@ -73,10 +73,78 @@ function LoadingIndicator() {
   );
 }
 
+// 松手模式控制组件
+function LockedControls({
+  onFinish,
+  onCancel,
+  level,
+  disabled
+}: {
+  onFinish: () => void;
+  onCancel: () => void;
+  level: number;
+  disabled: boolean;
+}) {
+  // 5 条音波，中间最高，两边递减（对称分布）
+  const barMultipliers = [0.5, 0.8, 1.0, 0.8, 0.5];
+
+  // 最小高度和最大高度
+  const minHeight = 4;
+  const maxHeight = 20;
+
+  // 放大音量让跳动更明显
+  const amplifiedLevel = Math.min(level * 1.8, 1.0);
+
+  return (
+    <div className="locked-controls">
+      {/* 取消按钮 */}
+      <button
+        onClick={onCancel}
+        disabled={disabled}
+        className={`locked-btn locked-btn-cancel ${disabled ? 'opacity-50' : ''}`}
+        title="取消 (Esc)"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18" />
+          <line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      </button>
+
+      {/* 中间 5 条音波 */}
+      <div className="locked-wave-mini">
+        {barMultipliers.map((multiplier, i) => {
+          const height = minHeight + (amplifiedLevel * multiplier * (maxHeight - minHeight));
+          return (
+            <div
+              key={i}
+              className="wave-bar-mini"
+              style={{ height: `${height}px` }}
+            />
+          );
+        })}
+      </div>
+
+      {/* 完成按钮 */}
+      <button
+        onClick={onFinish}
+        disabled={disabled}
+        className={`locked-btn locked-btn-finish ${disabled ? 'opacity-50' : ''}`}
+        title="发送 (Enter)"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
 // 主悬浮窗组件
 export default function OverlayWindow() {
   const [audioLevel, setAudioLevel] = useState(0);
   const [status, setStatus] = useState<OverlayStatus>("recording");
+  const [isLocked, setIsLocked] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   // 使用 ref 来存储平滑值，避免闭包问题
   const smoothedLevelRef = useRef(0);
   // 标记监听器是否已设置
@@ -109,10 +177,20 @@ export default function OverlayWindow() {
       // 监听录音开始
       const unlistenStart = await listen("recording_started", () => {
         setStatus("recording");
+        setIsLocked(false);
+        setIsSubmitting(false);
         smoothedLevelRef.current = 0;
         setAudioLevel(0);
       });
       unlistenFns.push(unlistenStart);
+
+      // 监听录音锁定（松手模式）
+      const unlistenLocked = await listen("recording_locked", () => {
+        console.log("进入松手模式");
+        setIsLocked(true);
+        setIsSubmitting(false);
+      });
+      unlistenFns.push(unlistenLocked);
 
       // 监听录音停止/转写开始
       const unlistenStop = await listen("recording_stopped", () => {
@@ -128,6 +206,8 @@ export default function OverlayWindow() {
       // 监听转写完成
       const unlistenComplete = await listen("transcription_complete", () => {
         setStatus("recording");
+        setIsLocked(false);
+        setIsSubmitting(false);
         smoothedLevelRef.current = 0;
         setAudioLevel(0);
       });
@@ -136,6 +216,8 @@ export default function OverlayWindow() {
       // 监听错误
       const unlistenError = await listen("error", () => {
         setStatus("recording");
+        setIsLocked(false);
+        setIsSubmitting(false);
         smoothedLevelRef.current = 0;
         setAudioLevel(0);
       });
@@ -144,6 +226,8 @@ export default function OverlayWindow() {
       // 监听取消
       const unlistenCancel = await listen("transcription_cancelled", () => {
         setStatus("recording");
+        setIsLocked(false);
+        setIsSubmitting(false);
         smoothedLevelRef.current = 0;
         setAudioLevel(0);
       });
@@ -167,6 +251,8 @@ export default function OverlayWindow() {
         try {
           await invoke("hide_overlay");
           setStatus("recording");
+          setIsLocked(false);
+          setIsSubmitting(false);
           smoothedLevelRef.current = 0;
           setAudioLevel(0);
         } catch (e) {
@@ -177,11 +263,60 @@ export default function OverlayWindow() {
     }
   }, [status]);
 
+  // 松手模式超时保护：60 秒后自动取消
+  useEffect(() => {
+    if (isLocked && !isSubmitting) {
+      const timeout = setTimeout(async () => {
+        console.warn("松手模式超时 60 秒，自动取消");
+        setIsSubmitting(true);
+        try {
+          await invoke("cancel_locked_recording");
+        } catch (e) {
+          console.error("取消锁定录音失败:", e);
+        }
+      }, 60000);
+      return () => clearTimeout(timeout);
+    }
+  }, [isLocked, isSubmitting]);
+
+  // 完成录音（松手模式）
+  const handleFinish = async () => {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    try {
+      await invoke("finish_locked_recording");
+    } catch (e) {
+      console.error("完成录音失败:", e);
+      setIsSubmitting(false);
+    }
+  };
+
+  // 取消录音（松手模式）
+  const handleCancel = async () => {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    try {
+      await invoke("cancel_locked_recording");
+    } catch (e) {
+      console.error("取消录音失败:", e);
+      setIsSubmitting(false);
+    }
+  };
+
   return (
     <div className="overlay-root">
-      <div className="overlay-pill">
+      <div className={`overlay-pill ${isLocked ? 'overlay-pill-locked' : ''}`}>
         {status === "recording" ? (
-          <WaveformBars level={audioLevel} />
+          isLocked ? (
+            <LockedControls
+              onFinish={handleFinish}
+              onCancel={handleCancel}
+              level={audioLevel}
+              disabled={isSubmitting}
+            />
+          ) : (
+            <WaveformBars level={audioLevel} />
+          )
         ) : (
           <LoadingIndicator />
         )}

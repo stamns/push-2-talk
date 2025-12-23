@@ -54,6 +54,8 @@ type HotkeyKey =
 
 interface HotkeyConfig {
   keys: HotkeyKey[];
+  enable_release_lock?: boolean;  // 已弃用，保留用于向后兼容
+  release_mode_keys?: HotkeyKey[];  // 松手模式独立快捷键
 }
 
 // 双热键配置（听写模式 + AI助手模式）
@@ -359,7 +361,7 @@ function App() {
   });
   const [assistantConfig, setAssistantConfig] = useState<AssistantConfig>(DEFAULT_ASSISTANT_CONFIG);
   const [isRecordingHotkey, setIsRecordingHotkey] = useState(false);
-  const [recordingMode, setRecordingMode] = useState<'dictation' | 'assistant'>('dictation'); // 当前录制模式
+  const [recordingMode, setRecordingMode] = useState<'dictation' | 'assistant' | 'release'>('dictation'); // 当前录制模式
   const [recordingKeys, setRecordingKeys] = useState<HotkeyKey[]>([]); // 录制时实时显示的按键
   const [hotkeyError, setHotkeyError] = useState<string | null>(null);
   const [currentMode, setCurrentMode] = useState<string | null>(null); // 当前转录模式: "normal" | "smartcommand"
@@ -473,9 +475,20 @@ function App() {
           // 根据录制模式更新对应的热键配置
           const newDualHotkeyConfig = { ...dualHotkeyConfig };
           if (recordingMode === 'dictation') {
-            newDualHotkeyConfig.dictation = { keys: keysArray };
+            newDualHotkeyConfig.dictation = {
+              ...newDualHotkeyConfig.dictation,
+              keys: keysArray
+            };
+          } else if (recordingMode === 'release') {
+            newDualHotkeyConfig.dictation = {
+              ...newDualHotkeyConfig.dictation,
+              release_mode_keys: keysArray
+            };
           } else {
-            newDualHotkeyConfig.assistant = { keys: keysArray };
+            newDualHotkeyConfig.assistant = {
+              ...newDualHotkeyConfig.assistant,
+              keys: keysArray
+            };
           }
           setDualHotkeyConfig(newDualHotkeyConfig);
           setHotkeyError(null);
@@ -492,7 +505,8 @@ function App() {
             asrConfig,
             dualHotkeyConfig: newDualHotkeyConfig
           }).then(() => {
-            console.log(`${recordingMode === 'dictation' ? '听写' : 'AI助手'}模式热键配置已保存:`, keysArray);
+            const modeName = recordingMode === 'dictation' ? '听写' : recordingMode === 'release' ? '松手' : 'AI助手';
+            console.log(`${modeName}模式热键配置已保存:`, keysArray);
           }).catch(err => {
             console.error("保存热键配置失败:", err);
           });
@@ -2210,51 +2224,131 @@ function App() {
                   </div>
                 </div>
 
-                {/* 听写模式快捷键 */}
+                {/* 听写模式快捷键 - 并排显示长按和松手模式 */}
                 <div className="space-y-2 mb-3">
                   <label className="text-xs font-medium text-slate-600">听写模式（语音转文字）</label>
-                  <div
-                    onClick={() => {
-                      if (status === 'idle') {
-                        setRecordingMode('dictation');
-                        setIsRecordingHotkey(true);
-                      }
-                    }}
-                    className={`flex items-center gap-2 p-3 bg-white border rounded-xl cursor-pointer transition-all min-h-[44px] ${
-                      isRecordingHotkey && recordingMode === 'dictation'
-                        ? 'border-blue-500 ring-2 ring-blue-200'
-                        : 'border-slate-200 hover:border-slate-300'
-                    } ${status !== 'idle' ? 'opacity-50 cursor-not-allowed' : ''}`}
-                  >
-                    <div className="flex-1 flex flex-wrap gap-1.5">
-                      {isRecordingHotkey && recordingMode === 'dictation' ? (
-                        recordingKeys.length > 0 ? (
-                          recordingKeys.map(key => (
-                            <span key={key} className="px-2.5 py-1 bg-blue-100 text-blue-700 text-xs font-medium rounded-md">
-                              {KEY_DISPLAY_NAMES[key]}
-                            </span>
-                          ))
-                        ) : (
-                          <span className="text-sm text-blue-600 animate-pulse">按下快捷键...</span>
-                        )
-                      ) : (
-                        dualHotkeyConfig.dictation.keys.map(key => (
-                          <span key={key} className="px-2.5 py-1 bg-slate-100 text-slate-700 text-xs font-medium rounded-md">
-                            {KEY_DISPLAY_NAMES[key]}
-                          </span>
-                        ))
-                      )}
+
+                  {/* 并排的两个快捷键配置 */}
+                  <div className="grid grid-cols-2 gap-2">
+                    {/* 左侧：长按录音 */}
+                    <div className="space-y-1">
+                      <div className="text-[10px] text-slate-400 pl-1">长按录音</div>
+                      <div
+                        onClick={() => {
+                          if (status === 'idle') {
+                            setRecordingMode('dictation');
+                            setIsRecordingHotkey(true);
+                          }
+                        }}
+                        className={`flex items-center gap-1 p-2 bg-white border rounded-lg cursor-pointer transition-all min-h-[40px] ${
+                          isRecordingHotkey && recordingMode === 'dictation'
+                            ? 'border-blue-500 ring-2 ring-blue-200'
+                            : 'border-slate-200 hover:border-slate-300'
+                        } ${status !== 'idle' ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      >
+                        <div className="flex-1 flex flex-wrap gap-1">
+                          {isRecordingHotkey && recordingMode === 'dictation' ? (
+                            recordingKeys.length > 0 ? (
+                              recordingKeys.map(key => (
+                                <span key={key} className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-medium rounded">
+                                  {KEY_DISPLAY_NAMES[key]}
+                                </span>
+                              ))
+                            ) : (
+                              <span className="text-xs text-blue-600 animate-pulse">按下...</span>
+                            )
+                          ) : (
+                            dualHotkeyConfig.dictation.keys.map(key => (
+                              <span key={key} className="px-1.5 py-0.5 bg-slate-100 text-slate-700 text-[10px] font-medium rounded">
+                                {KEY_DISPLAY_NAMES[key]}
+                              </span>
+                            ))
+                          )}
+                        </div>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); resetHotkeyToDefault('dictation'); }}
+                          disabled={status !== 'idle'}
+                          className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors disabled:opacity-50"
+                          title="重置为默认"
+                        >
+                          <RotateCcw size={12} />
+                        </button>
+                      </div>
                     </div>
 
-                    <button
-                      onClick={(e) => { e.stopPropagation(); resetHotkeyToDefault('dictation'); }}
-                      disabled={status !== 'idle'}
-                      className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors disabled:opacity-50"
-                      title="重置为默认 (Ctrl+Win)"
-                    >
-                      <RotateCcw size={14} />
-                    </button>
+                    {/* 右侧：松手模式 */}
+                    <div className="space-y-1">
+                      <div className="text-[10px] text-slate-400 pl-1">松手模式 <span className="text-blue-500">省力版</span></div>
+                      <div
+                        onClick={() => {
+                          if (status === 'idle') {
+                            setRecordingMode('release');
+                            setIsRecordingHotkey(true);
+                          }
+                        }}
+                        className={`flex items-center gap-1 p-2 bg-white border rounded-lg cursor-pointer transition-all min-h-[40px] ${
+                          isRecordingHotkey && recordingMode === 'release'
+                            ? 'border-blue-500 ring-2 ring-blue-200'
+                            : 'border-slate-200 hover:border-slate-300'
+                        } ${status !== 'idle' ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      >
+                        <div className="flex-1 flex flex-wrap gap-1">
+                          {isRecordingHotkey && recordingMode === 'release' ? (
+                            recordingKeys.length > 0 ? (
+                              recordingKeys.map(key => (
+                                <span key={key} className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-medium rounded">
+                                  {KEY_DISPLAY_NAMES[key]}
+                                </span>
+                              ))
+                            ) : (
+                              <span className="text-xs text-blue-600 animate-pulse">按下...</span>
+                            )
+                          ) : (
+                            (dualHotkeyConfig.dictation.release_mode_keys || ['f2']).map(key => (
+                              <span key={key} className="px-1.5 py-0.5 bg-blue-50 text-blue-700 text-[10px] font-medium rounded">
+                                {KEY_DISPLAY_NAMES[key as HotkeyKey] || key}
+                              </span>
+                            ))
+                          )}
+                        </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            // 重置松手模式为默认 F2
+                            const newConfig = {
+                              ...dualHotkeyConfig,
+                              dictation: {
+                                ...dualHotkeyConfig.dictation,
+                                release_mode_keys: ['f2'] as HotkeyKey[]
+                              }
+                            };
+                            setDualHotkeyConfig(newConfig);
+                            invoke("save_config", {
+                              apiKey,
+                              fallbackApiKey,
+                              useRealtime,
+                              enablePostProcess,
+                              llmConfig,
+                              smartCommandConfig,
+                              assistantConfig,
+                              asrConfig,
+                              dualHotkeyConfig: newConfig
+                            });
+                          }}
+                          disabled={status !== 'idle'}
+                          className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors disabled:opacity-50"
+                          title="重置为默认 F2"
+                        >
+                          <RotateCcw size={12} />
+                        </button>
+                      </div>
+                    </div>
                   </div>
+
+                  {/* 说明文字 */}
+                  <p className="text-[10px] text-slate-400 pl-1">
+                    松手模式：按一下开始录音，点击悬浮窗按钮完成
+                  </p>
                 </div>
 
                 {/* AI 助手模式快捷键 */}

@@ -4,19 +4,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PushToTalk is a desktop application built with Tauri 2.0 that enables voice-to-text input via global keyboard shortcuts. The architecture follows a clear separation between:
+PushToTalk is a desktop application built with Tauri 2.0 that enables voice-to-text input and AI-powered assistance via global keyboard shortcuts. The architecture follows a clear separation between:
 - **React frontend** (TypeScript + Tailwind CSS) for UI
 - **Rust backend** (Tauri) for system-level operations
 
-The application flow: User presses Ctrl+Win → Records audio → Releases key → Transcribes via ASR API (Qwen/Doubao/SenseVoice) → Optional LLM post-processing → Auto-inserts text into active window.
+### Core Workflows
+
+**1. Dictation Mode (按住/松手录音)**
+- Press Ctrl+Win (or custom hotkey) → Records audio → Release key → Transcribes via ASR API → Optional LLM post-processing → Auto-inserts text into active window
+- Supports two recording modes:
+  - **Press Mode**: Hold key to record, release to stop (traditional)
+  - **Toggle Mode**: Press F2 to start, press F2 again to finish (prevents accidental stops)
+
+**2. AI Assistant Mode (智能指令模式)**
+- Press Alt+Space (or custom hotkey) → Captures selected text → Records voice command → Processes with context-aware LLM → Replaces/inserts text
+- Two operating modes:
+  - **Q&A Mode**: No text selected, ask questions and get answers
+  - **Text Processing Mode**: Text selected, give commands to transform selected text
 
 ### Key Features
+
+- **Dual Recording Modes**:
+  - Press mode (hold to record)
+  - Toggle/Release mode (press once to start, press again to finish, F2 default)
+- **AI Assistant Mode**: Context-aware text processing with voice commands (Alt+Space default)
+- **Custom Hotkey Binding**: 73 keys supported (modifiers, letters, numbers, F1-F12, arrows, etc.)
 - **Multi-ASR Support**: Alibaba Qwen (realtime/HTTP), Doubao (realtime/HTTP), SiliconFlow SenseVoice
+- **ASR Fallback Strategy**: Automatic fallback from Doubao/Qwen to SenseVoice with parallel racing
 - **LLM Post-Processing**: Optional text polishing, translation, or formatting via OpenAI-compatible APIs
-- **Visual Feedback**: Overlay window shows recording status with real-time waveform
+- **Visual Feedback**: Overlay window shows recording status with real-time waveform visualization
+- **Audio Feedback**: Start/stop beep sounds via rodio player
 - **Transcription History**: Automatic history tracking with search and copy functionality
 - **System Tray**: Minimize to tray on close, auto-start on boot support
 - **Multi-Configuration**: Save and switch between different LLM prompt presets
+- **Auto-Update**: Tauri Plugin Updater v2 with 6 mirror endpoints for reliable updates
 
 ## Development Commands
 
@@ -30,10 +51,12 @@ npm run tauri dev             # Run dev server (requires admin rights on Windows
 
 ### Building
 ```bash
-npm run tauri build           # Build production bundles (MSI + NSIS installers)
+npm run tauri build           # Build production bundles (NSIS installer only)
 ```
 
 Output location: `src-tauri/target/release/bundle/`
+
+**Note**: MSI installer support removed to prevent multiple instances during auto-update.
 
 ### Testing API Integration
 ```bash
@@ -56,8 +79,11 @@ cargo check                   # Fast compile check
 
 The Rust backend is organized into independent modules that communicate through the main lib.rs orchestrator:
 
-1. **hotkey_service.rs** - Global keyboard listener using `rdev`
-   - Monitors Ctrl+Win key combination
+1. **hotkey_service.rs** - Custom dual-hotkey listener using `rdev`
+   - Supports **73 keys**: modifiers, letters, numbers, F1-F12, arrows, navigation keys
+   - **Dual hotkey system**: Independent dictation and assistant mode bindings
+   - **Ghost key detection**: Windows Win32 API (`GetAsyncKeyState`) prevents stuck states from rdev event loss
+   - **500ms watchdog timer**: Automatic state recovery for reliability
    - Thread-safe state management with `Arc<Mutex<bool>>`
    - Callback-based: `on_start()` and `on_stop()` closures passed to `start()`
    - **Platform requirement**: Windows admin rights mandatory
@@ -80,52 +106,105 @@ The Rust backend is organized into independent modules that communicate through 
    - **asr/realtime/qwen.rs** - Qwen WebSocket realtime mode
    - **asr/realtime/doubao.rs** - Doubao WebSocket realtime mode
    - **asr/race_strategy.rs** - Parallel ASR request racing with automatic fallback
+     - Primary ASR (Qwen/Doubao) retries up to 2 times with 500ms delay
+     - SenseVoice runs in parallel background thread
+     - Smart fallback: checks background result before each retry
+     - Returns first success or combined error if both fail
    - **Timeout & Retry**: 6s request timeout with automatic retry (max 2 retries)
    - Base64 encodes audio before upload in HTTP mode
 
-5. **llm_post_processor.rs** - Optional LLM text refinement
+5. **llm_post_processor.rs** - Optional LLM text refinement (for dictation mode)
    - Sends transcribed text to OpenAI-compatible API with custom system prompts
    - Supports multiple presets: text polishing, translation, email formatting, etc.
    - Users can define custom scenarios via UI
+   - HTTP connection pool optimized (increased pool limits)
 
-6. **text_inserter.rs** - Clipboard-based text injection
+6. **assistant_processor.rs** - AI Assistant mode processor
+   - **Dual system prompts**:
+     - `qa_system_prompt`: For Q&A mode (no selected text)
+     - `text_processing_system_prompt`: For text processing mode (with selected text)
+   - Independent LLM endpoint configuration (separate from dictation mode)
+   - Context-aware processing based on clipboard content
+
+7. **clipboard_manager.rs** - Context capture for AI Assistant
+   - Captures selected text via clipboard with **3 retry attempts** (exponential backoff)
+   - **100ms delay** after hotkey release before Ctrl+C (prevents modifier key conflicts)
+   - RAII `ClipboardGuard` ensures automatic restoration even on panic
+   - Uses `arboard` for clipboard operations + `enigo` for keyboard simulation
+
+8. **text_inserter.rs** - Clipboard-based text injection
    - Strategy: Save clipboard → Copy text → Simulate Ctrl+V → Restore clipboard
    - Uses `arboard` (clipboard) + `enigo` (keyboard simulation)
+   - **Focus management**: 150ms delay before text insertion to restore window focus (for toggle mode)
 
-7. **audio_utils.rs** - Audio processing utilities
+9. **audio_utils.rs** - Audio processing utilities
    - VAD (Voice Activity Detection) for silence trimming
-   - RMS calculation for waveform visualization
+   - RMS calculation for waveform visualization (×1.5 amplification for normal, ×1.8 for locked)
    - Audio format conversion helpers
+   - Smooth transitions: 70%/30% on rise, 40%/60% on fall
 
-8. **config.rs** - Persistent configuration
-   - Stores all API keys and settings in `%APPDATA%\PushToTalk\config.json`
-   - Supports multiple LLM prompt presets with custom names
-   - Manages minimize-to-tray and auto-start preferences
-   - Uses `dirs` crate for cross-platform app data directory
+10. **beep_player.rs** - Audio feedback system
+    - Plays start/stop beep sounds using `rodio` crate
+    - Provides tactile feedback for recording state changes
+
+11. **config.rs** - Persistent configuration
+    - Stores all API keys and settings in `%APPDATA%\PushToTalk\config.json`
+    - **Automatic migration** from old single-hotkey to dual-hotkey system
+    - **Backward compatibility** for SmartCommandConfig → AssistantConfig
+    - Supports multiple LLM prompt presets with custom names
+    - Manages minimize-to-tray and auto-start preferences
+    - Uses `dirs` crate for cross-platform app data directory
+
+12. **pipeline/** - Processing pipeline framework
+    - **pipeline/normal.rs** - Dictation mode pipeline: ASR → Optional LLM → Insert
+    - **pipeline/assistant.rs** - AI Assistant pipeline: Capture → ASR → Context LLM → Replace
+    - Pipeline result structure tracks timing metrics (ASR time, LLM time, total time)
+    - Clean separation of concerns between transcription and text processing
 
 ### Frontend Architecture (src/)
 
 Multi-page React app with Tauri IPC communication:
 
 - **Main Window (App.tsx)**: Configuration UI with tabbed interface
-  - ASR provider selection and API key management
+  - ASR provider selection with fallback configuration
+  - Primary and fallback ASR provider settings
+  - Custom dual-hotkey binding UI (73 keys supported)
+  - Recording mode toggle (Press vs Toggle/Release)
+  - AI Assistant configuration with dual system prompts
   - LLM post-processing settings with custom prompt presets
   - Transcription history display with search and copy
   - Minimize-to-tray and auto-start toggles
+  - **Auto-update integration**:
+    - Automatic check on startup
+    - Manual check button
+    - Update status tracking (idle → checking → available → downloading → ready)
+    - Progress indication with visual feedback
+    - Silent installation via Tauri Plugin Updater v2
 
 - **Overlay Window (OverlayWindow.tsx)**: Floating recording status indicator
-  - Displays real-time recording state (listening/processing/success/error)
-  - Shows live audio waveform visualization
+  - **Three visual states**:
+    1. **Recording (Normal)**: 9-bar waveform, red gradient pill
+    2. **Recording (Locked/Toggle)**: 5-bar mini waveform + dual control buttons, blue pill (#3B82F6)
+       - Cancel button (X icon) on left
+       - Finish button (checkmark) on right
+    3. **Transcribing**: Dot matrix + rotating sun icon
+  - Real-time audio waveform visualization (min 4px, max 24px normal / 20px locked)
   - Auto-hides when idle, appears during recording
   - Always-on-top, click-through window
+  - **Safety mechanisms**:
+    - 15-second transcription timeout with forced hide
+    - 60-second locked recording timeout with auto-cancel
+    - Duplicate listener prevention
+    - Submit button debouncing
 
 - **State Management**: React hooks (useState, useEffect) for local state
 - **Tauri Communication**:
   - `invoke()` for commands: `save_config`, `load_config`, `start_app`, `stop_app`, `get_history`, `get_auto_start_enabled`, `set_auto_start`, etc.
-  - `listen()` for events: `recording_started`, `recording_stopped`, `transcribing`, `transcription_complete`, `error`, `audio_level`, `overlay_update`
+  - `listen()` for events: `recording_started`, `recording_stopped`, `recording_locked`, `transcribing`, `transcription_complete`, `error`, `audio_level`, `overlay_update`
 
 ### Critical Event Flow
 
+#### Dictation Mode (Press Mode - Traditional)
 ```
 User presses Ctrl+Win
   → hotkey_service detects via rdev callback
@@ -134,15 +213,68 @@ User presses Ctrl+Win
   → Emits "overlay_update" with state: "listening"
   → streaming_recorder.start_recording() / audio_recorder.start_recording()
   → Periodic "audio_level" events for waveform visualization
+  → Beep player plays start sound
 
 User releases key
   → hotkey_service detects release
   → Calls on_stop() closure
   → Emits "recording_stopped" event
   → Emits "overlay_update" with state: "processing"
+  → Beep player plays stop sound
   → streaming_recorder.stop_recording() / audio_recorder.stop_recording()
   → Emits "transcribing" event
+  → Pipeline processing begins
+```
 
+#### Dictation Mode (Toggle Mode - Release Lock)
+```
+User presses F2 (first time)
+  → hotkey_service detects press
+  → Sets is_recording_locked to true
+  → Calls on_start() closure
+  → Emits "recording_locked" event to frontend
+  → Emits "overlay_update" with state: "locked"
+  → streaming_recorder.start_recording()
+  → 60-second safety timer starts
+  → Beep player plays start sound
+
+User presses F2 (second time) or timeout
+  → hotkey_service detects press or timer expires
+  → Race condition protection with is_processing_stop atomic flag
+  → Sets is_recording_locked to false
+  → Calls on_stop() closure
+  → Emits "recording_stopped" event
+  → Hides overlay window
+  → 150ms delay to restore window focus
+  → Beep player plays stop sound
+  → Pipeline processing begins
+```
+
+#### AI Assistant Mode
+```
+User selects text and presses Alt+Space
+  → hotkey_service detects assistant hotkey
+  → Waits 100ms after key release
+  → clipboard_manager.capture_selected_text()
+    → Simulates Ctrl+C
+    → Retries up to 3 times with exponential backoff
+    → Stores in ClipboardGuard (RAII)
+  → Starts audio recording
+  → Emits "recording_started" event
+
+User releases Alt+Space (or presses again if toggle mode)
+  → Stops recording
+  → ASR transcription
+  → assistant_processor.process()
+    → If clipboard has content: text_processing_system_prompt
+    → If clipboard empty: qa_system_prompt
+    → Sends to LLM with context
+  → text_inserter.insert_text() replaces/inserts result
+  → ClipboardGuard restores original clipboard
+```
+
+#### Pipeline Processing Flow
+```
 Realtime Mode (WebSocket):
   → Audio chunks sent during recording via WebSocket
   → Partial results received and accumulated
@@ -152,35 +284,58 @@ HTTP Mode:
   → Complete WAV file uploaded after recording stops
   → Single transcription result returned
 
-Post-Processing:
+ASR Fallback (race_strategy.rs):
+  → Primary ASR (Qwen/Doubao) starts
+  → SenseVoice starts in parallel background thread
+  → Primary retries up to 2 times (500ms delay)
+  → Before each retry, checks if SenseVoice succeeded
+  → Returns first success or waits for both results
+  → If both fail, returns combined error
+
+Post-Processing (Normal Pipeline):
   → (Optional) llm_post_processor.process() refines text
   → text_inserter.insert_text() injects result
   → Emits "transcription_complete" with final text
   → Emits "overlay_update" with state: "success"
   → Saves to history
   → Deletes temp audio file (if applicable)
+
+AI Assistant Pipeline:
+  → assistant_processor.process() with context
+  → text_inserter.insert_text() replaces selection or inserts at cursor
+  → Emits "transcription_complete"
+  → Saves to history
 ```
 
 ### Tauri IPC Commands (lib.rs)
 
 All backend functions exposed via `#[tauri::command]`:
 
-- `save_config(config: Config)` - Persist full configuration to disk
+- `save_config(config: AppConfig)` - Persist full configuration to disk with automatic migration
 - `load_config()` - Load saved configuration
-- `start_app(window: Window, config: Config)` - Initialize all services and start hotkey listener
+- `start_app(window: Window, config: AppConfig)` - Initialize all services and start hotkey listener
 - `stop_app()` - Cleanup and stop services
 - `get_history()` - Retrieve transcription history
 - `clear_history()` - Delete all history records
 - `get_auto_start_enabled()` - Check if auto-start is enabled
-- `set_auto_start(enable: bool)` - Toggle auto-start on boot
+- `set_auto_start(enable: bool)` - Toggle auto-start on boot (requires admin)
 
-The `AppState` struct manages shared mutable state across all services using `Arc<Mutex<>>`.
+The `AppState` struct manages shared mutable state across all services using `Arc<Mutex<>>` and atomic flags.
 
 ### System Tray Integration
 
 - **Minimize to Tray**: Configurable option to minimize instead of close
 - **Auto-Start**: Windows registry-based auto-start on boot (requires admin)
 - **Tray Menu**: Show/Hide window, Quit application
+
+### Auto-Update System
+
+- **Tauri Plugin Updater v2**: `tauri-plugin-updater` with passive install mode
+- **6 Mirror Endpoints**: gh-proxy.org, hk.gh-proxy.org, cdn.jsdelivr.net, github.com, cdn.gh-proxy.org, edgeone.gh-proxy.org
+- **Ed25519 Signature**: Public key verification for security
+- **Artifact Creation**: `createUpdaterArtifacts: true` in tauri.conf.json
+- **Update Flow**: Check → Download → Verify → Install → Restart
+- **Current Version**: 0.0.14
 
 ## Important Implementation Details
 
@@ -190,9 +345,35 @@ The audio stream from `cpal` is NOT Send-safe. The current solution spawns a ded
 ### Global Hotkey Detection
 `rdev` requires system-level permissions. On Windows, this means:
 - Must launch with administrator privileges
-- Alternative: Use `tauri-plugin-global-shortcut` (not implemented in MVP)
+- Alternative: Use `tauri-plugin-global-shortcut` (not implemented)
+- **Ghost key detection** via Win32 `GetAsyncKeyState` API prevents stuck states
+
+### Custom Hotkey System
+73 keys supported across categories:
+- **Modifiers**: ControlLeft/Right, ShiftLeft/Right, AltLeft/Right, MetaLeft/Right
+- **Letters**: A-Z (26 keys)
+- **Numbers**: 0-9 (10 keys)
+- **Function**: F1-F12 (12 keys)
+- **Navigation**: Arrow keys, Home, End, PageUp, PageDown
+- **Special**: Space, Tab, Escape, Return, Backspace, Delete, Insert, CapsLock
+
+Configuration stored as `Vec<HotkeyKey>` with support for multi-key combinations.
+
+### Toggle Mode (Release Lock) Implementation
+- **Atomic lock flag**: `is_recording_locked: Arc<AtomicBool>`
+- **Race condition protection**: `is_processing_stop` atomic flag
+- **60-second safety timer**: Auto-cancel long recordings
+- **Focus management**: 150ms delay before text insertion to restore window focus
+- **Overlay window hide**: Ensures target window is focused before Ctrl+V
+
+### AI Assistant Context Capture
+- **100ms delay** after hotkey release before Ctrl+C simulation
+- **3 retry attempts** with exponential backoff (1s, 2s, 4s)
+- **ClipboardGuard**: RAII pattern ensures restoration even on panic
+- **Dual system prompts**: Different prompts for Q&A vs text processing
 
 ### API Response Format
+
 **Qwen ASR response structure:**
 ```json
 {
@@ -245,8 +426,8 @@ Run specific binary: `cargo run --bin test_api`
 
 ### "Transcription timeout" or API hangs
 - Cause: API request taking too long or network issues
-- Solution: Automatic 6s timeout with 2 retry attempts
-- Implementation: Uses `reqwest::Client` with timeout configuration
+- Solution: Automatic 6s timeout with 2 retry attempts (500ms delay between)
+- Fallback: SenseVoice runs in parallel and will take over if primary fails
 
 ### "HTTP connection pool exhausted"
 - Cause: Default reqwest pool size too small for concurrent requests
@@ -263,17 +444,61 @@ Run specific binary: `cargo run --bin test_api`
 - Solution: Must run installer with admin privileges
 - Registry path: `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`
 
+### Toggle mode text not inserting
+- Cause: Target window loses focus when overlay is visible
+- Solution: Hide overlay 150ms before text insertion to restore focus
+
+### Ghost key stuck state
+- Cause: rdev occasionally misses key release events
+- Solution: Win32 `GetAsyncKeyState` verification + 500ms watchdog timer
+
+### Multiple instances after update
+- Cause: MSI installers bypass Tauri's single-instance mechanism
+- Solution: Removed MSI support, use NSIS installer only
+
 ## Configuration
 
 Config file location: `%APPDATA%\PushToTalk\config.json`
 
 ### Configuration Structure
+
 ```json
 {
-  "dashscope_api_key": "sk-...",
-  "doubao_app_id": "...",
-  "doubao_access_token": "...",
-  "siliconflow_api_key": "sk-...",
+  "asr_config": {
+    "primary": {
+      "provider": "qwen",
+      "mode": "realtime",
+      "dashscope_api_key": "sk-..."
+    },
+    "fallback": {
+      "provider": "siliconflow",
+      "mode": "http",
+      "siliconflow_api_key": "sk-..."
+    },
+    "enable_fallback": true
+  },
+  "dual_hotkey_config": {
+    "dictation": {
+      "keys": [
+        {"key": "ControlLeft"},
+        {"key": "MetaLeft"}
+      ],
+      "mode": "Press",
+      "enable_release_lock": true,
+      "release_mode_keys": [
+        {"key": "F2"}
+      ]
+    },
+    "assistant": {
+      "keys": [
+        {"key": "AltLeft"},
+        {"key": "Space"}
+      ],
+      "mode": "Press",
+      "enable_release_lock": false,
+      "release_mode_keys": null
+    }
+  },
   "llm_enabled": true,
   "llm_api_key": "sk-...",
   "llm_base_url": "https://open.bigmodel.cn/api/paas/v4",
@@ -283,15 +508,37 @@ Config file location: `%APPDATA%\PushToTalk\config.json`
     {"name": "文本润色", "prompt": "..."},
     {"name": "中译英", "prompt": "..."}
   ],
+  "assistant_config": {
+    "enabled": true,
+    "endpoint": "https://api.openai.com/v1/chat/completions",
+    "model": "gpt-4",
+    "api_key": "sk-...",
+    "qa_system_prompt": "You are a helpful assistant...",
+    "text_processing_system_prompt": "You are an expert text editor..."
+  },
   "minimize_to_tray": true,
-  "selected_asr_provider": "qwen_realtime"
+  "transcription_mode": "Dictation"
 }
 ```
 
 ### API Key Sources
+
 - **DashScope (Qwen)**: https://bailian.console.aliyun.com/?tab=model#/api-key
 - **Doubao (ByteDance)**:
   - Recording file recognition: https://console.volcengine.com/ark/region:ark+cn-beijing/tts/recordingRecognition
   - Streaming recognition: https://console.volcengine.com/ark/region:ark+cn-beijing/tts/speechRecognition
 - **SiliconFlow**: https://cloud.siliconflow.cn/me/account/ak
 - **ZhipuAI (GLM-4-Flash)**: https://docs.bigmodel.cn/cn/guide/models/free/glm-4-flash-250414
+
+## Key Architecture Decisions
+
+1. **Pipeline Pattern**: Separates concerns between transcription, LLM processing, and text insertion
+2. **Dual Processor Design**: AssistantProcessor separate from LlmPostProcessor (independent API configs)
+3. **RAII Guards**: ClipboardGuard ensures restoration even on panic
+4. **Atomic State Management**: Lock-free concurrency for recording state
+5. **Event-Driven UI**: Tauri events for real-time frontend updates
+6. **Race Strategy**: Parallel ASR racing maximizes reliability without sacrificing speed
+7. **Ghost Key Detection**: Win32 API verification prevents stuck states from rdev event loss
+8. **Focus Management**: Overlay window hiding + delay ensures text insertion succeeds
+9. **Dual Hotkey System**: Independent configuration for dictation and assistant modes
+10. **Automatic Migration**: Backward compatibility for configuration schema changes

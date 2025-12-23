@@ -26,6 +26,7 @@ use streaming_recorder::StreamingRecorder;
 use text_inserter::TextInserter;
 
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{
     AppHandle, Emitter, Manager,
     tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState},
@@ -58,6 +59,14 @@ struct AppState {
     hotkey_service: Arc<HotkeyService>,
     /// 当前触发模式（听写/AI助手）
     current_trigger_mode: Arc<Mutex<Option<config::TriggerMode>>>,
+    /// 松手模式：录音是否已锁定
+    is_recording_locked: Arc<AtomicBool>,
+    /// 松手模式：长按检测定时器句柄
+    lock_timer_handle: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
+    /// 松手模式：录音开始时间（用于竞态条件检查）
+    recording_start_time: Arc<Mutex<Option<std::time::Instant>>>,
+    /// 松手模式：正在处理停止中（防止重复触发）
+    is_processing_stop: Arc<AtomicBool>,
 }
 
 // Tauri Commands
@@ -558,7 +567,13 @@ async fn start_app(
 
     // 启动全局快捷键监听（双模式支持）
     tracing::info!("[DEBUG] 准备热键配置...");
-    let dual_hotkey_cfg = dual_hotkey_config.unwrap_or_default();
+    let mut dual_hotkey_cfg = dual_hotkey_config.unwrap_or_default();
+
+    // === 修复旧配置：如果 release_mode_keys 为 None，设置默认值 F2 ===
+    if dual_hotkey_cfg.dictation.release_mode_keys.is_none() {
+        dual_hotkey_cfg.dictation.release_mode_keys = Some(vec![config::HotkeyKey::F2]);
+        tracing::info!("松手模式快捷键未配置，使用默认值 F2");
+    }
 
     // 验证热键配置
     tracing::info!("[DEBUG] 验证热键配置...");
@@ -613,8 +628,26 @@ async fn start_app(
     let is_running_stop = Arc::clone(&state.is_running);
     let enable_fallback_stop = Arc::clone(&state.enable_fallback);
 
-    // 按键按下回调（支持双模式）
-    let on_start = move |trigger_mode: config::TriggerMode| {
+    // 松手模式相关变量（用于 on_start）
+    let is_recording_locked_start = Arc::clone(&state.is_recording_locked);
+    let lock_timer_handle_start = Arc::clone(&state.lock_timer_handle);
+    let recording_start_time_start = Arc::clone(&state.recording_start_time);
+    let dual_hotkey_cfg_start = dual_hotkey_cfg.clone();
+
+    // 松手模式相关变量（用于 on_stop）
+    let is_recording_locked_stop = Arc::clone(&state.is_recording_locked);
+    let lock_timer_handle_stop = Arc::clone(&state.lock_timer_handle);
+    let recording_start_time_stop = Arc::clone(&state.recording_start_time);
+    let is_processing_stop_stop = Arc::clone(&state.is_processing_stop);
+
+    // 按键按下回调（支持双模式 + 松手模式）
+    let on_start = move |trigger_mode: config::TriggerMode, is_release_mode: bool| {
+        // === 防重入：如果已锁定（松手模式），忽略新的按键 ===
+        if is_recording_locked_start.load(Ordering::SeqCst) {
+            tracing::info!("当前处于松手锁定模式，忽略新的按键触发");
+            return;
+        }
+
         if !*is_running_start.lock().unwrap() {
             tracing::debug!("服务已停止，忽略快捷键按下事件");
             return;
@@ -622,7 +655,8 @@ async fn start_app(
 
         // 保存当前触发模式
         *current_trigger_mode_start.lock().unwrap() = Some(trigger_mode);
-        tracing::info!("触发模式: {:?}", trigger_mode);
+        let mode_desc = if is_release_mode { "松手模式" } else { "普通模式" };
+        tracing::info!("触发模式: {:?} ({})", trigger_mode, mode_desc);
 
         // 注意：剪贴板捕获已移至 on_stop 回调
         // 原因：在 on_start 时物理按键仍被按住，模拟 Ctrl+C 会与 Alt/Meta 等修饰键冲突
@@ -640,10 +674,12 @@ async fn start_app(
         let api_key = api_key_start.clone();
         let doubao_app_id = doubao_app_id_start.clone();
         let doubao_access_token = doubao_access_token_start.clone();
+        let is_recording_locked_spawn = Arc::clone(&is_recording_locked_start);
 
         tauri::async_runtime::spawn(async move {
+            // 1. 先执行开始录音逻辑 (内部会发送 recording_started 事件)
             handle_recording_start(
-                app,
+                app.clone(),
                 recorder,
                 streaming_recorder,
                 active_session,
@@ -655,14 +691,54 @@ async fn start_app(
                 doubao_app_id,
                 doubao_access_token,
             ).await;
+
+            // 2. 录音初始化完成后，再发送锁定事件
+            // 这样前端会先收到 started (重置UI)，再收到 locked (切换为蓝色UI)
+            if is_release_mode && trigger_mode == config::TriggerMode::Dictation {
+                is_recording_locked_spawn.store(true, Ordering::SeqCst);
+                let _ = app.emit("recording_locked", ());
+                tracing::info!("通过松手模式快捷键启动，直接进入锁定状态");
+            }
         });
     };
 
     // 按键释放回调（支持双模式）
-    let on_stop = move |trigger_mode: config::TriggerMode| {
+    // 注意：is_release_mode = true 表示松手模式下再次按键完成录音
+    let on_stop = move |trigger_mode: config::TriggerMode, is_release_mode: bool| {
         // 检查服务是否仍在运行
         if !*is_running_stop.lock().unwrap() {
             tracing::debug!("服务已停止，忽略快捷键释放事件");
+            return;
+        }
+
+        // === 松手模式完成：用户再次按下快捷键完成录音并转写 ===
+        if is_release_mode {
+            tracing::info!("松手模式完成：用户再次按下快捷键，结束录音并转写");
+            // 清除锁定状态，让代码继续执行正常的停止和转写流程
+            is_recording_locked_stop.store(false, Ordering::SeqCst);
+            *recording_start_time_stop.lock().unwrap() = None;
+            if let Some(handle) = lock_timer_handle_stop.lock().unwrap().take() {
+                handle.abort();
+            }
+            // 不 return，继续向下执行正常的停止录音和转写流程
+        }
+
+        // === 松手模式：立即清理定时器相关状态（防止竞态）===
+        *recording_start_time_stop.lock().unwrap() = None;
+        if let Some(handle) = lock_timer_handle_stop.lock().unwrap().take() {
+            handle.abort();
+        }
+
+        // === 松手模式：检查锁定状态 ===
+        if is_recording_locked_stop.load(Ordering::SeqCst) {
+            tracing::info!("录音已锁定（松手模式），忽略物理按键释放");
+            return; // 不停止录音，等待用户点击悬浮窗按钮
+        }
+
+        // === 防止与 finish_locked_recording 竞态 ===
+        // 如果 finish_locked_recording 已经在处理，跳过 on_stop
+        if is_processing_stop_stop.load(Ordering::SeqCst) {
+            tracing::info!("finish_locked_recording 正在处理中，跳过 on_stop");
             return;
         }
 
@@ -1719,12 +1795,161 @@ async fn cancel_transcription(app_handle: AppHandle) -> Result<String, String> {
     Ok("已取消转录".to_string())
 }
 
+/// 完成锁定录音（松手模式）
+/// 用户点击悬浮窗完成按钮时调用
+#[tauri::command]
+async fn finish_locked_recording(app_handle: AppHandle) -> Result<String, String> {
+    tracing::info!("用户点击完成按钮，结束锁定录音");
+
+    let state = app_handle.state::<AppState>();
+
+    if !state.is_recording_locked.load(Ordering::SeqCst) {
+        return Err("未处于锁定录音状态".to_string());
+    }
+
+    // 防止与 on_stop 竞态：使用 compare_exchange 原子操作
+    // 如果已经在处理中，直接返回
+    if state.is_processing_stop.compare_exchange(
+        false, true, Ordering::SeqCst, Ordering::SeqCst
+    ).is_err() {
+        tracing::warn!("已有停止处理正在进行中，跳过重复触发");
+        return Err("正在处理中".to_string());
+    }
+
+    // 清除锁定状态
+    state.is_recording_locked.store(false, Ordering::SeqCst);
+    *state.recording_start_time.lock().unwrap() = None;
+
+    // 重置热键服务状态（防止状态卡死）
+    state.hotkey_service.reset_state();
+
+    // 获取并清空触发模式（松手模式仅支持听写模式）
+    let trigger_mode = state.current_trigger_mode.lock().unwrap()
+        .take()
+        .unwrap_or(config::TriggerMode::Dictation);
+
+    // 播放停止提示音
+    beep_player::play_stop_beep();
+
+    // 发送录音停止事件（前端会显示处理动画）
+    let _ = app_handle.emit("recording_stopped", ());
+
+    // 注意：不在这里隐藏窗口！
+    // 窗口会在 Pipeline 的 insert_text 之前隐藏，这样用户能看到完整的处理动画
+    // 隐藏逻辑已移至 pipeline/normal.rs 和 pipeline/assistant.rs
+
+    // 获取需要的状态变量
+    let use_realtime = *state.use_realtime_asr.lock().unwrap();
+    let streaming_recorder = Arc::clone(&state.streaming_recorder);
+    let audio_recorder = Arc::clone(&state.audio_recorder);
+    let active_session = Arc::clone(&state.active_session);
+    let doubao_session = Arc::clone(&state.doubao_session);
+    let realtime_provider = Arc::clone(&state.realtime_provider);
+    let audio_sender_handle = Arc::clone(&state.audio_sender_handle);
+    let post_processor = Arc::clone(&state.post_processor);
+    let text_inserter = Arc::clone(&state.text_inserter);
+    let qwen_client = Arc::clone(&state.qwen_client);
+    let sensevoice_client = Arc::clone(&state.sensevoice_client);
+    let doubao_client = Arc::clone(&state.doubao_client);
+    let enable_fallback = Arc::clone(&state.enable_fallback);
+
+    // 执行停止处理（仅听写模式）
+    let app = app_handle.clone();
+    match trigger_mode {
+        config::TriggerMode::Dictation => {
+            if use_realtime {
+                handle_realtime_stop(
+                    app,
+                    streaming_recorder,
+                    active_session,
+                    doubao_session,
+                    realtime_provider,
+                    audio_sender_handle,
+                    post_processor,
+                    text_inserter,
+                    qwen_client,
+                    sensevoice_client,
+                    doubao_client,
+                    enable_fallback,
+                ).await;
+            } else {
+                handle_http_transcription(
+                    app,
+                    audio_recorder,
+                    post_processor,
+                    text_inserter,
+                    qwen_client,
+                    sensevoice_client,
+                    doubao_client,
+                    enable_fallback,
+                ).await;
+            }
+        }
+        config::TriggerMode::AiAssistant => {
+            // 松手模式不支持 AI 助手模式，但为了安全性仍然处理
+            tracing::warn!("松手模式不支持 AI 助手模式，跳过处理");
+        }
+    }
+
+    // 重置处理标志
+    state.is_processing_stop.store(false, Ordering::SeqCst);
+
+    Ok("录音已完成".to_string())
+}
+
+/// 取消锁定录音（松手模式）
+/// 用户点击悬浮窗取消按钮时调用
+#[tauri::command]
+async fn cancel_locked_recording(app_handle: AppHandle) -> Result<String, String> {
+    tracing::info!("用户点击取消按钮，取消锁定录音");
+
+    let state = app_handle.state::<AppState>();
+
+    if !state.is_recording_locked.load(Ordering::SeqCst) {
+        return Err("未处于锁定录音状态".to_string());
+    }
+
+    // 防止与 on_stop 竞态：使用 compare_exchange 原子操作
+    if state.is_processing_stop.compare_exchange(
+        false, true, Ordering::SeqCst, Ordering::SeqCst
+    ).is_err() {
+        tracing::warn!("已有停止处理正在进行中，跳过重复触发");
+        return Err("正在处理中".to_string());
+    }
+
+    // 清除锁定状态
+    state.is_recording_locked.store(false, Ordering::SeqCst);
+    *state.recording_start_time.lock().unwrap() = None;
+    *state.current_trigger_mode.lock().unwrap() = None;
+
+    // 重置热键服务状态（防止状态卡死）
+    state.hotkey_service.reset_state();
+
+    // ===== 同样需要隐藏悬浮窗，让焦点恢复 =====
+    tracing::info!("隐藏悬浮窗，等待焦点恢复...");
+    if let Some(overlay) = app_handle.get_webview_window("overlay") {
+        let _ = overlay.hide();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+
+    // 克隆 is_processing_stop 用于后续重置
+    let is_processing_stop = Arc::clone(&state.is_processing_stop);
+
+    // 调用现有的取消逻辑
+    let result = cancel_transcription(app_handle).await;
+
+    // 重置处理标志
+    is_processing_stop.store(false, Ordering::SeqCst);
+
+    result
+}
+
 /// 显示录音悬浮窗
 #[tauri::command]
 async fn show_overlay(app_handle: AppHandle) -> Result<(), String> {
     if let Some(overlay) = app_handle.get_webview_window("overlay") {
         overlay.show().map_err(|e| e.to_string())?;
-        overlay.set_focus().map_err(|e| e.to_string())?;
+        // 注意：不调用 set_focus()，避免抢夺用户当前窗口的焦点
     }
     Ok(())
 }
@@ -1827,6 +2052,10 @@ pub fn run() {
                 audio_sender_handle: Arc::new(Mutex::new(None)),
                 hotkey_service: Arc::new(HotkeyService::new()),
                 current_trigger_mode: Arc::new(Mutex::new(None)),
+                is_recording_locked: Arc::new(AtomicBool::new(false)),
+                lock_timer_handle: Arc::new(Mutex::new(None)),
+                recording_start_time: Arc::new(Mutex::new(None)),
+                is_processing_stop: Arc::new(AtomicBool::new(false)),
             };
             app.manage(app_state);
 
@@ -1878,6 +2107,8 @@ pub fn run() {
             start_app,
             stop_app,
             cancel_transcription,
+            finish_locked_recording,
+            cancel_locked_recording,
             hide_to_tray,
             quit_app,
             show_overlay,
