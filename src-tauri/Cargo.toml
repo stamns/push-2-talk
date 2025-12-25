@@ -1,6 +1,6 @@
 [package]
 name = "push-to-talk"
-version = "0.0.15"
+version = "1.0.0"
 description = "A push-to-talk speech-to-text application"
 authors = ["you"]
 license = ""
@@ -57,6 +57,9 @@ tauri-plugin-autostart = "2"
 # 自动更新
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+
+# 打开外部链接
+tauri-plugin-opener = "2"
 
 [features]
 # This feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!

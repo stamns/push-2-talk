@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Mic,
   StopCircle,
@@ -31,7 +32,11 @@ import {
   Power,
   Download,
   RefreshCw,
-  Keyboard
+  Keyboard,
+  BookOpen,
+  KeyRound,
+  ScrollText,
+  Github
 } from "lucide-react";
 import { nanoid } from 'nanoid';
 
@@ -1116,8 +1121,10 @@ function App() {
   };
 
   // --- 历史记录操作 ---
-  const handleCopyRecord = (record: HistoryRecord) => {
-    const text = record.polishedText || record.originalText;
+  const handleCopyText = (text: string, e?: React.MouseEvent) => {
+    if (e) {
+      e.stopPropagation(); // 阻止事件冒泡
+    }
     navigator.clipboard.writeText(text);
     setCopyToast('已复制到剪贴板');
     setTimeout(() => setCopyToast(null), 2000);
@@ -1231,13 +1238,24 @@ function App() {
             <div className="absolute -inset-0.5 bg-gradient-to-r from-blue-300 to-indigo-300 rounded-2xl blur opacity-20 group-hover:opacity-40 transition duration-500"></div>
             <div className="relative flex flex-col h-64 bg-white/60 backdrop-blur-sm border border-white/60 rounded-2xl p-6 shadow-inner transition-all">
               <div className="flex items-center justify-between mb-4">
-                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-                  <Activity size={14} />
-                  {originalTranscript
-                    ? (currentMode === 'assistant' ? 'AI 助手' : '转写结果')
-                    : '实时转写内容'
-                  }
-                </label>
+                <div className="flex items-center gap-3">
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                    <Activity size={14} />
+                    {originalTranscript
+                      ? (currentMode === 'assistant' ? 'AI 助手' : '转写结果')
+                      : '实时转写内容'
+                    }
+                  </label>
+                  {transcript && !originalTranscript && (
+                    <button
+                      onClick={(e) => handleCopyText(transcript, e)}
+                      className="p-1.5 rounded-md bg-white/50 border border-slate-200/50 text-slate-400 hover:text-blue-600 hover:bg-blue-50 hover:border-blue-200 transition-all shadow-sm"
+                      title="复制文本"
+                    >
+                      <Copy size={13} />
+                    </button>
+                  )}
+                </div>
                 {transcript && (
                     <div className="flex items-center gap-2 flex-wrap justify-end">
                       {asrTime !== null && (
@@ -1265,21 +1283,38 @@ function App() {
               {originalTranscript ? (
                 <div className="flex-1 grid grid-cols-2 gap-4 min-h-0">
                   <div className="flex flex-col min-h-0 border-r border-slate-200 pr-4">
-                    <div className="text-xs text-slate-400 mb-2 flex items-center gap-1">
-                      <Mic size={12} /> {currentMode === 'assistant' ? '用户问题' : '原始转录'}
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="text-xs text-slate-400 flex items-center gap-1">
+                        <Mic size={12} /> {currentMode === 'assistant' ? '用户问题' : '原始转录'}
+                      </div>
+                      <button
+                        onClick={(e) => handleCopyText(originalTranscript, e)}
+                        className="p-1 rounded-md text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-all"
+                        title="复制原始文本"
+                      >
+                        <Copy size={12} />
+                      </button>
                     </div>
                     <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar">
                       <p className="text-slate-500 text-sm leading-relaxed whitespace-pre-wrap">{originalTranscript}</p>
                     </div>
                   </div>
                   <div className="flex flex-col min-h-0">
-                    <div className="text-xs text-violet-500 mb-2 flex items-center gap-1">
-                      <Wand2 size={12} />
-                      {/* 根据模式显示不同标签 */}
-                      {currentMode === 'assistant'
-                        ? 'AI 助手'
-                        : `${llmConfig.presets.find(p => p.id === llmConfig.active_preset_id)?.name || "智能"}润色`
-                      }
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="text-xs text-violet-500 flex items-center gap-1">
+                        <Wand2 size={12} />
+                        {currentMode === 'assistant'
+                          ? 'AI 助手'
+                          : `${llmConfig.presets.find(p => p.id === llmConfig.active_preset_id)?.name || "智能"}润色`
+                        }
+                      </div>
+                      <button
+                        onClick={(e) => handleCopyText(transcript, e)}
+                        className="p-1 rounded-md text-violet-400 hover:text-violet-600 hover:bg-violet-50 transition-all"
+                        title="复制结果"
+                      >
+                        <Copy size={12} />
+                      </button>
                     </div>
                     <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar">
                       <p className="text-slate-700 text-base leading-relaxed whitespace-pre-wrap">{transcript}</p>
@@ -1432,12 +1467,34 @@ function App() {
             )}
 
             <div className="flex justify-end gap-4 text-xs text-slate-400">
-               <a href="https://help.aliyun.com/zh/dashscope/developer-reference/quick-start" target="_blank" className="hover:text-blue-600 transition-colors flex items-center gap-1">
-                 DashScope 文档 ↗
-               </a>
-               <a href="https://cloud.siliconflow.cn/" target="_blank" className="hover:text-indigo-600 transition-colors flex items-center gap-1">
-                 硅基流动 ↗
-               </a>
+               <button
+                 onClick={() => openUrl("https://ncn18msloi7t.feishu.cn/wiki/NFM3wAcWNi0IGTkUqkVckxWWntb")}
+                 className="hover:text-blue-600 transition-colors flex items-center gap-1 group cursor-pointer"
+               >
+                 <BookOpen size={13} className="group-hover:scale-110 transition-transform"/>
+                 使用教程 ↗
+               </button>
+               <button
+                 onClick={() => openUrl("https://ncn18msloi7t.feishu.cn/wiki/ZnBZwSNjpisUdYkKks1cbes8nGb")}
+                 className="hover:text-emerald-600 transition-colors flex items-center gap-1 group cursor-pointer"
+               >
+                 <KeyRound size={13} className="group-hover:scale-110 transition-transform"/>
+                 API Key 申请 ↗
+               </button>
+               <button
+                 onClick={() => openUrl("https://ncn18msloi7t.feishu.cn/wiki/EmTFwwtIfigqQDkXjBIc3oDonPd")}
+                 className="hover:text-violet-600 transition-colors flex items-center gap-1 group cursor-pointer"
+               >
+                 <ScrollText size={13} className="group-hover:scale-110 transition-transform"/>
+                 更新日志 ↗
+               </button>
+               <button
+                 onClick={() => openUrl("https://github.com/yyyzl/push-2-talk")}
+                 className="hover:text-slate-700 transition-colors flex items-center gap-1 group cursor-pointer"
+               >
+                 <Github size={13} className="group-hover:scale-110 transition-transform"/>
+                 GitHub ↗
+               </button>
             </div>
           </div>
         </div>
@@ -1971,14 +2028,13 @@ function App() {
                 history.map(record => (
                   <div
                     key={record.id}
-                    onClick={() => record.success && handleCopyRecord(record)}
                     className={`p-4 rounded-xl border transition-all ${
                       record.success
-                        ? 'bg-white border-slate-100 hover:border-blue-200 hover:shadow-md cursor-pointer'
+                        ? 'bg-white border-slate-100 hover:border-blue-200 hover:shadow-md'
                         : 'bg-red-50/50 border-red-100'
                     }`}
                   >
-                    <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center justify-between mb-3">
                       <span className="text-xs text-slate-400 flex items-center gap-1">
                         <Clock size={12} />
                         {formatTimestamp(record.timestamp)}
@@ -1993,16 +2049,73 @@ function App() {
                           <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">
                             {(record.totalTimeMs / 1000).toFixed(1)}s
                           </span>
-                          <Copy size={14} className="text-slate-400" />
                         </div>
                       ) : (
                         <span className="text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded">失败</span>
                       )}
                     </div>
+
                     {record.success ? (
-                      <p className="text-sm text-slate-700 line-clamp-3">
-                        {record.polishedText || record.originalText}
-                      </p>
+                      record.polishedText ? (
+                        // 有LLM处理：显示双栏（原始 + 处理后）
+                        <div className="grid grid-cols-2 gap-3">
+                          {/* 左侧：原始文本 */}
+                          <div className="flex flex-col min-h-0 bg-slate-50/50 rounded-lg p-2.5">
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="text-[11px] font-medium text-slate-500 flex items-center gap-1">
+                                <Mic size={11} /> 原始转写
+                              </div>
+                              <button
+                                onClick={(e) => handleCopyText(record.originalText, e)}
+                                className="p-1.5 rounded-md bg-white border border-slate-200 hover:border-blue-400 hover:bg-blue-50 text-slate-500 hover:text-blue-600 transition-all shadow-sm hover:shadow"
+                                title="复制原始文本"
+                              >
+                                <Copy size={13} />
+                              </button>
+                            </div>
+                            <p className="text-xs text-slate-600 line-clamp-3 leading-relaxed">
+                              {record.originalText}
+                            </p>
+                          </div>
+
+                          {/* 右侧：处理后文本 */}
+                          <div className="flex flex-col min-h-0 bg-violet-50/30 rounded-lg p-2.5">
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="text-[11px] font-medium text-violet-600 flex items-center gap-1">
+                                <Wand2 size={11} /> {record.presetName || '润色后'}
+                              </div>
+                              <button
+                                onClick={(e) => handleCopyText(record.polishedText!, e)}
+                                className="p-1.5 rounded-md bg-white border border-violet-200 hover:border-violet-400 hover:bg-violet-50 text-violet-500 hover:text-violet-600 transition-all shadow-sm hover:shadow"
+                                title="复制处理后文本"
+                              >
+                                <Copy size={13} />
+                              </button>
+                            </div>
+                            <p className="text-xs text-slate-700 line-clamp-3 leading-relaxed font-medium">
+                              {record.polishedText}
+                            </p>
+                          </div>
+                        </div>
+                      ) : (
+                        // 无LLM处理：单栏显示
+                        <div className="flex flex-col bg-slate-50/50 rounded-lg p-3">
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="text-[11px] font-medium text-slate-500">转写结果</div>
+                            <button
+                              onClick={(e) => handleCopyText(record.originalText, e)}
+                              className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 hover:border-blue-400 hover:bg-blue-50 text-slate-600 hover:text-blue-600 transition-all flex items-center gap-1.5 shadow-sm hover:shadow group"
+                              title="复制文本"
+                            >
+                              <Copy size={14} />
+                              <span className="text-xs font-medium">复制</span>
+                            </button>
+                          </div>
+                          <p className="text-sm text-slate-700 line-clamp-3 leading-relaxed">
+                            {record.originalText}
+                          </p>
+                        </div>
+                      )
                     ) : (
                       <p className="text-sm text-red-600 line-clamp-2">{record.errorMessage}</p>
                     )}
@@ -2347,7 +2460,7 @@ function App() {
 
                   {/* 说明文字 */}
                   <p className="text-[10px] text-slate-400 pl-1">
-                    松手模式：按一下开始录音，点击悬浮窗按钮完成
+                    松手模式：按一下开始录音，再按一下或点击悬浮窗按钮完成
                   </p>
                 </div>
 

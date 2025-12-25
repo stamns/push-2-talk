@@ -17,6 +17,8 @@ PushToTalk 是一个高性能的桌面语音输入工具，集成了大语言模
 1. **听写模式**：按住 `Ctrl+Win` 说话，松开后自动转录并插入文本，支持 LLM 智能润色
 2. **AI 助手模式**：选中文本后按 `Alt+Space` 说话，用语音命令处理选中的文本；或直接提问获得答案
 
+[使用教程](https://ncn18msloi7t.feishu.cn/wiki/NFM3wAcWNi0IGTkUqkVckxWWntb)
+
 ### ✨ 核心特性
 
 #### 双模式工作
@@ -55,6 +57,10 @@ PushToTalk 是一个高性能的桌面语音输入工具，集成了大语言模
 > ⚠️ **重要**：必须以管理员身份运行才能使用全局快捷键功能
 
 ### 配置
+
+### 快捷链接
+[API Key申请教学文档](https://ncn18msloi7t.feishu.cn/wiki/ZnBZwSNjpisUdYkKks1cbes8nGb)
+
 
 #### 1. ASR 配置（至少配置一个）
 
