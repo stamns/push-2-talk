@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -289,6 +290,9 @@ const ASR_PROVIDERS: Record<AsrProvider, { name: string; model: string; docsUrl:
 };
 
 function App() {
+  const [currentVersion, setCurrentVersion] = useState(() =>
+    localStorage.getItem('app_version') || ''
+  );
   const [apiKey, setApiKey] = useState("");
   const [fallbackApiKey, setFallbackApiKey] = useState("");
 
@@ -423,6 +427,13 @@ function App() {
       }
     };
     init();
+  }, []);
+
+  useEffect(() => {
+    getVersion().then(v => {
+      setCurrentVersion(v);
+      localStorage.setItem('app_version', v);
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -2730,7 +2741,7 @@ function App() {
                             ? `发现新版本 v${updateInfo.version}`
                             : updateStatus === "checking"
                             ? '正在连接服务器...'
-                            : '当前版本 v1.0.1'}
+                            : `当前版本 v${currentVersion}`}
                         </div>
                       </div>
                     </div>
