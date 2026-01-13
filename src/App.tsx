@@ -2687,6 +2687,32 @@ function App() {
                       <path d="M1 1L5 5L1 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
                     </svg>
                   </button>
+                  {/* 个人词典 */}
+                  <button
+                    onClick={() => {
+                      setShowSettingsModal(false);
+                      setServiceModalTab('dictionary');
+                      setShowServiceModal(true);
+                    }}
+                    className="w-full flex items-center justify-between p-3.5 hover:bg-slate-100/50 transition-all"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className={`p-1.5 rounded-lg transition-colors ${
+                        dictionary.length > 0 ? 'bg-orange-100 text-orange-600' : 'bg-slate-200 text-slate-500'
+                      }`}>
+                        <BookText size={16} />
+                      </div>
+                      <div className="text-left">
+                        <div className="text-sm font-medium text-slate-700">个人词典</div>
+                        <div className="text-[11px] text-slate-400 leading-tight">
+                          {dictionary.length > 0 ? `${dictionary.length} 个词条` : '未添加词条'}
+                        </div>
+                      </div>
+                    </div>
+                    <svg width="6" height="10" viewBox="0 0 6 10" fill="none" className="text-slate-300">
+                      <path d="M1 1L5 5L1 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  </button>
                 </div>
               </div>
               {/* 系统设置分组 */}
