@@ -41,6 +41,7 @@ import {
   BookText
 } from "lucide-react";
 import { nanoid } from 'nanoid';
+import { ErrorDisplay } from './components/ErrorDisplay';
 // --- 新的接口定义 ---
 // 热键类型定义
 type HotkeyKey =
@@ -179,6 +180,7 @@ const formatTimestamp = (ts: number): string => {
   const d = new Date(ts);
   return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`;
 };
+
 // 默认配置
 const DEFAULT_PRESETS: LlmPreset[] = [
   {
@@ -1231,12 +1233,7 @@ function App() {
           </div>
         </div>
         <div className="p-6 space-y-5">
-          {error && (
-            <div className="flex items-center gap-3 p-4 bg-red-50/80 border border-red-100 rounded-2xl text-red-600 text-sm animate-in slide-in-from-top-2 fade-in duration-300">
-              <AlertCircle size={18} />
-              <span>{error}</span>
-            </div>
-          )}
+          <ErrorDisplay error={error} onClose={() => setError(null)} />
           {/* Transcript Display Area */}
           <div className="relative group">
             <div className="absolute -inset-0.5 bg-gradient-to-r from-blue-300 to-indigo-300 rounded-2xl blur opacity-20 group-hover:opacity-40 transition duration-500"></div>
