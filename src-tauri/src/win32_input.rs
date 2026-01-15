@@ -8,7 +8,7 @@ use std::time::Duration;
 
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+    SendInput, GetAsyncKeyState, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
     KEYEVENTF_KEYUP, VIRTUAL_KEY,
     VK_CONTROL, VK_LCONTROL, VK_RCONTROL,
     VK_SHIFT, VK_LSHIFT, VK_RSHIFT,
@@ -20,6 +20,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 /// 按键间延迟（毫秒）
 /// 保守设置以确保在各种应用中稳定工作
 const KEY_DELAY_MS: u64 = 15;
+
+/// 检查指定虚拟键是否被按下
+#[cfg(target_os = "windows")]
+fn is_vk_pressed(vk: VIRTUAL_KEY) -> bool {
+    unsafe { (GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000) != 0 }
+}
 
 /// 发送单个按键按下事件
 #[cfg(target_os = "windows")]
@@ -115,23 +121,23 @@ pub fn send_ctrl_v() -> Result<()> {
 
 /// 释放所有修饰键（防御性措施）
 /// 用于确保热键释放后不会有残留的修饰键状态
+/// 只释放真正被按下的键，避免发送虚假的 key_up 事件触发系统行为
 #[cfg(target_os = "windows")]
 pub fn release_all_modifiers() -> Result<()> {
-    tracing::debug!("win32_input: 释放所有修饰键");
+    tracing::debug!("win32_input: 释放所有修饰键（仅释放被按下的键）");
 
-    // 尝试释放所有可能的修饰键，忽略错误
-    // 同时释放通用键码和左右分开的键码，确保完全清除
-    let _ = send_key_up(VK_CONTROL);
-    let _ = send_key_up(VK_LCONTROL);
-    let _ = send_key_up(VK_RCONTROL);
-    let _ = send_key_up(VK_SHIFT);
-    let _ = send_key_up(VK_LSHIFT);
-    let _ = send_key_up(VK_RSHIFT);
-    let _ = send_key_up(VK_MENU);    // Alt
-    let _ = send_key_up(VK_LMENU);   // 左 Alt
-    let _ = send_key_up(VK_RMENU);   // 右 Alt
-    let _ = send_key_up(VK_LWIN);    // 左 Windows 键
-    let _ = send_key_up(VK_RWIN);    // 右 Windows 键
+    // 只释放真正被按下的修饰键，避免触发系统行为（如 Win 键释放触发开始菜单）
+    if is_vk_pressed(VK_CONTROL) { let _ = send_key_up(VK_CONTROL); }
+    if is_vk_pressed(VK_LCONTROL) { let _ = send_key_up(VK_LCONTROL); }
+    if is_vk_pressed(VK_RCONTROL) { let _ = send_key_up(VK_RCONTROL); }
+    if is_vk_pressed(VK_SHIFT) { let _ = send_key_up(VK_SHIFT); }
+    if is_vk_pressed(VK_LSHIFT) { let _ = send_key_up(VK_LSHIFT); }
+    if is_vk_pressed(VK_RSHIFT) { let _ = send_key_up(VK_RSHIFT); }
+    if is_vk_pressed(VK_MENU) { let _ = send_key_up(VK_MENU); }
+    if is_vk_pressed(VK_LMENU) { let _ = send_key_up(VK_LMENU); }
+    if is_vk_pressed(VK_RMENU) { let _ = send_key_up(VK_RMENU); }
+    if is_vk_pressed(VK_LWIN) { let _ = send_key_up(VK_LWIN); }
+    if is_vk_pressed(VK_RWIN) { let _ = send_key_up(VK_RWIN); }
 
     Ok(())
 }
