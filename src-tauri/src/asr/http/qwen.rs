@@ -25,6 +25,11 @@ impl QwenASRClient {
         }
     }
 
+    /// 热更新词库
+    pub fn update_dictionary(&mut self, dictionary: Vec<String>) {
+        self.dictionary = dictionary;
+    }
+
     pub async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<String> {
         let mut last_error = None;
 

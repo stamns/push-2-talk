@@ -262,69 +262,73 @@ export default function OverlayWindow() {
   const [status, setStatus] = useState<OverlayStatus>("recording");
   const [isLocked, setIsLocked] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const listenersSetup = useRef(false);
 
   // 使用 Hook 获取平滑的音频级别和动画时间
   const { level: audioLevel, time: animationTime } = useSmoothAudioLevel(status === "recording");
 
   useEffect(() => {
-    if (listenersSetup.current) return;
-    listenersSetup.current = true;
-
     const unlistenFns: UnlistenFn[] = [];
+    let cancelled = false;
 
     const setup = async () => {
-      const unlistenStart = await listen("recording_started", () => {
+      // 辅助函数：注册监听器并检查取消状态，解决 StrictMode 竞态条件
+      const registerListener = async (
+        event: string,
+        handler: () => void,
+      ): Promise<boolean> => {
+        const unlisten = await listen(event, handler);
+        if (cancelled) {
+          unlisten();
+          return false;
+        }
+        unlistenFns.push(unlisten);
+        return true;
+      };
+
+      if (!(await registerListener("recording_started", () => {
         setStatus("recording");
         setIsLocked(false);
         setIsSubmitting(false);
-      });
-      unlistenFns.push(unlistenStart);
+      }))) return;
 
-      const unlistenLocked = await listen("recording_locked", () => {
+      if (!(await registerListener("recording_locked", () => {
         console.log("进入松手模式");
         setIsLocked(true);
         setIsSubmitting(false);
-      });
-      unlistenFns.push(unlistenLocked);
+      }))) return;
 
-      const unlistenStop = await listen("recording_stopped", () => {
+      if (!(await registerListener("recording_stopped", () => {
         setStatus("transcribing");
-      });
-      unlistenFns.push(unlistenStop);
+      }))) return;
 
-      const unlistenTranscribing = await listen("transcribing", () => {
+      if (!(await registerListener("transcribing", () => {
         setStatus("transcribing");
-      });
-      unlistenFns.push(unlistenTranscribing);
+      }))) return;
 
-      const unlistenComplete = await listen("transcription_complete", () => {
+      if (!(await registerListener("transcription_complete", () => {
         setStatus("recording");
         setIsLocked(false);
         setIsSubmitting(false);
-      });
-      unlistenFns.push(unlistenComplete);
+      }))) return;
 
-      const unlistenError = await listen("error", () => {
+      if (!(await registerListener("error", () => {
         setStatus("recording");
         setIsLocked(false);
         setIsSubmitting(false);
-      });
-      unlistenFns.push(unlistenError);
+      }))) return;
 
-      const unlistenCancel = await listen("transcription_cancelled", () => {
+      if (!(await registerListener("transcription_cancelled", () => {
         setStatus("recording");
         setIsLocked(false);
         setIsSubmitting(false);
-      });
-      unlistenFns.push(unlistenCancel);
+      }))) return;
     };
 
     setup();
 
     return () => {
+      cancelled = true;
       unlistenFns.forEach(fn => fn());
-      listenersSetup.current = false;
     };
   }, []);
 

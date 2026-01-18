@@ -68,7 +68,7 @@ impl AssistantPipeline {
         };
 
         // 3. 发送处理中事件
-        let _ = app.emit("post_processing", ());
+        let _ = app.emit("post_processing", "assistant");
         let llm_start = Instant::now();
 
         // 4. 根据是否有选中文本选择处理方式

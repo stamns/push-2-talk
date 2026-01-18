@@ -351,39 +351,60 @@ pub enum AsrProvider {
     SiliconFlow,
 }
 
+impl Default for AsrProvider {
+    fn default() -> Self {
+        AsrProvider::Qwen
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AsrCredentials {
+    #[serde(default)]
+    pub qwen_api_key: String,
+    #[serde(default)]
+    pub sensevoice_api_key: String,
+    #[serde(default)]
+    pub doubao_app_id: String,
+    #[serde(default)]
+    pub doubao_access_token: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AsrProviderConfig {
-    pub provider: AsrProvider,
-    pub api_key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub app_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub access_token: Option<String>,
+pub struct AsrSelection {
+    #[serde(default)]
+    pub active_provider: AsrProvider,
+    #[serde(default)]
+    pub enable_fallback: bool,
+    #[serde(default)]
+    pub fallback_provider: Option<AsrProvider>,
+}
+
+impl Default for AsrSelection {
+    fn default() -> Self {
+        Self {
+            active_provider: AsrProvider::Qwen,
+            enable_fallback: false,
+            fallback_provider: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsrConfig {
-    pub primary: AsrProviderConfig,
-    #[serde(default)]
-    pub fallback: Option<AsrProviderConfig>,
-    #[serde(default)]
-    pub enable_fallback: bool,
+    pub credentials: AsrCredentials,
+    pub selection: AsrSelection,
 }
 
 impl Default for AsrConfig {
     fn default() -> Self {
         Self {
-            primary: AsrProviderConfig {
-                provider: AsrProvider::Qwen,
-                api_key: String::new(),
-                app_id: None,
-                access_token: None,
-            },
-            fallback: None,
-            enable_fallback: false,
+            credentials: AsrCredentials::default(),
+            selection: AsrSelection::default(),
         }
     }
 }
+
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -645,7 +666,7 @@ impl Default for LlmConfig {
 }
 
 fn default_use_realtime_asr() -> bool {
-    true
+    false
 }
 
 impl AppConfig {
@@ -681,33 +702,55 @@ impl AppConfig {
         tracing::info!("尝试从以下路径加载配置: {:?}", path);
         if path.exists() {
             let content = std::fs::read_to_string(&path)?;
-            let mut config: AppConfig = serde_json::from_str(&content)?;
+            
+            // 使用 serde_json::Value 先解析，以支持结构迁移
+            let v: serde_json::Value = serde_json::from_str(&content)?;
+            
+            // 尝试直接反序列化为 AppConfig
+            let mut config: AppConfig = match serde_json::from_value(v.clone()) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("直接解析配置失败，尝试手动迁移: {}", e);
+                    let mut cfg = AppConfig::new();
+
+                    // 尝试从原始 JSON 提取未变更的字段
+                    if let Some(llm_config) = v.get("llm_config") {
+                        if let Ok(llm) = serde_json::from_value(llm_config.clone()) {
+                            tracing::info!("成功恢复 llm_config");
+                            cfg.llm_config = llm;
+                        }
+                    }
+                    if let Some(assistant_config) = v.get("assistant_config") {
+                        if let Ok(assistant) = serde_json::from_value(assistant_config.clone()) {
+                            tracing::info!("成功恢复 assistant_config");
+                            cfg.assistant_config = assistant;
+                        }
+                    }
+                    if let Some(dictionary) = v.get("dictionary") {
+                        if let Ok(dict) = serde_json::from_value(dictionary.clone()) {
+                            tracing::info!("成功恢复 dictionary");
+                            cfg.dictionary = dict;
+                        }
+                    }
+
+                    cfg
+                }
+            };
 
             // ========== 迁移逻辑 ==========
 
-            // 迁移 1: ASR 配置迁移（已有）
-            if config.asr_config.primary.api_key.is_empty() && !config.dashscope_api_key.is_empty() {
-                tracing::info!("检测到旧配置格式，自动迁移到新格式");
-                config.asr_config.primary = AsrProviderConfig {
-                    provider: AsrProvider::Qwen,
-                    api_key: config.dashscope_api_key.clone(),
-                    app_id: None,
-                    access_token: None,
-                };
-                if !config.siliconflow_api_key.is_empty() {
-                    config.asr_config.fallback = Some(AsrProviderConfig {
-                        provider: AsrProvider::SiliconFlow,
-                        api_key: config.siliconflow_api_key.clone(),
-                        app_id: None,
-                        access_token: None,
-                    });
-                    config.asr_config.enable_fallback = true;
-                }
+            // 1. 兼容更早的根目录 Key (dashscope_api_key / siliconflow_api_key)
+            if config.asr_config.credentials.qwen_api_key.is_empty() && !config.dashscope_api_key.is_empty() {
+                tracing::info!("从根配置迁移 Qwen API Key");
+                config.asr_config.credentials.qwen_api_key = config.dashscope_api_key.clone();
+            }
+            if config.asr_config.credentials.sensevoice_api_key.is_empty() && !config.siliconflow_api_key.is_empty() {
+                tracing::info!("从根配置迁移 SiliconFlow API Key");
+                config.asr_config.credentials.sensevoice_api_key = config.siliconflow_api_key.clone();
             }
 
-            // 迁移 2: 旧单快捷键 → 新双快捷键
+            // 迁移 3: 旧单快捷键 → 新双快捷键 (保持原有逻辑)
             if let Some(old_hotkey) = config.hotkey_config.take() {
-                // 只有在 dual_hotkey_config 是默认值时才迁移
                 let is_default = config.dual_hotkey_config.dictation.keys == vec![HotkeyKey::ControlLeft, HotkeyKey::MetaLeft]
                     && config.dual_hotkey_config.assistant.keys == vec![HotkeyKey::AltLeft, HotkeyKey::Space];
 
@@ -717,9 +760,8 @@ impl AppConfig {
                 }
             }
 
-            // 迁移 3: SmartCommandConfig → AssistantConfig
+            // 迁移 4: SmartCommandConfig → AssistantConfig (保持原有逻辑)
             if config.smart_command_config.enabled && config.smart_command_config.is_valid() {
-                // 如果 assistant_config 是默认值（未配置），从 smart_command_config 迁移
                 if !config.assistant_config.is_valid() {
                     tracing::info!("迁移 Smart Command 配置到 AI 助手配置");
                     config.assistant_config = AssistantConfig {
@@ -730,12 +772,10 @@ impl AppConfig {
                         qa_system_prompt: config.smart_command_config.system_prompt.clone(),
                         text_processing_system_prompt: default_assistant_text_processing_prompt(),
                     };
-                    // 迁移后禁用旧配置
                     config.smart_command_config.enabled = false;
                 }
             }
 
-            // LLM 预设检查（已有）
             if config.llm_config.presets.is_empty() {
                  tracing::info!("检测到预设列表为空，用户可能删除了所有预设");
             }
@@ -752,7 +792,30 @@ impl AppConfig {
         let path = Self::config_path()?;
         let content = serde_json::to_string_pretty(self)?;
         tracing::info!("保存配置到: {:?}", path);
-        std::fs::write(&path, content)?;
+
+        // 使用原子写入：先写临时文件，再重命名（避免文件锁定和损坏）
+        let temp_path = path.with_extension("json.tmp");
+
+        tracing::info!("写入临时文件: {:?}", temp_path);
+        std::fs::write(&temp_path, &content).map_err(|e| {
+            tracing::error!("写入临时文件失败: {}", e);
+            e
+        })?;
+
+        tracing::info!("重命名临时文件到目标文件");
+        // Windows 上如果目标文件存在，先删除
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| {
+                tracing::error!("删除旧配置文件失败: {}", e);
+                e
+            })?;
+        }
+
+        std::fs::rename(&temp_path, &path).map_err(|e| {
+            tracing::error!("重命名临时文件失败: {}", e);
+            e
+        })?;
+
         tracing::info!("配置保存成功");
         Ok(())
     }

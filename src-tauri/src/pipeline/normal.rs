@@ -89,7 +89,7 @@ impl NormalPipeline {
     ) -> (String, Option<String>, Option<u64>) {
         if let Some(processor) = processor {
             tracing::info!("NormalPipeline: 开始 LLM 后处理...");
-            let _ = app.emit("post_processing", ());
+            let _ = app.emit("post_processing", "polishing");
 
             let llm_start = Instant::now();
             match processor.polish_transcript(text).await {

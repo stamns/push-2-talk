@@ -23,6 +23,11 @@ impl DoubaoASRClient {
         }
     }
 
+    /// 热更新词库
+    pub fn update_dictionary(&mut self, dictionary: Vec<String>) {
+        self.dictionary = dictionary;
+    }
+
     pub async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<String> {
         let audio_base64 = general_purpose::STANDARD.encode(audio_data);
         tracing::info!("豆包 ASR: 音频数据大小 {} bytes", audio_data.len());
